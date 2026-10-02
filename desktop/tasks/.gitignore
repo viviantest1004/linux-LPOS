@@ -1,0 +1,5 @@
+# wayland-scanner output, remade on every build from
+# desktop/common/protocols (see the Makefile).
+*-client-protocol.h
+*-protocol.c
+*.o

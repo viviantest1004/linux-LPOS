@@ -1,0 +1,31 @@
+drm/fb-helper: a one-line write that ends at the line end is the whole line
+
+LP-only fix for drm_fb_helper_memory_range_to_clip(). For a write() that
+covers a single scanline, the clip is narrowed to the bytes written, and
+the right edge is computed from end % line_length. When the write ends
+exactly at the end of the line that is 0, so x2 = 0 and the damage
+rectangle is empty: nothing is flushed. On a driver with a shadow buffer
+(virtio-gpu in every VM) a program that writes the screen a row at a
+time - LP's recovery menu, the boot splash - got a black screen, with
+only writes that stopped short of the right edge showing.
+
+--- a/drivers/gpu/drm/drm_fb_helper.c
++++ b/drivers/gpu/drm/drm_fb_helper.c
+@@ -640,7 +640,16 @@
+ 		off_t bit_end = (end % line_length) * 8;
+ 
+ 		x1 = bit_off / info->var.bits_per_pixel;
+-		x2 = DIV_ROUND_UP(bit_end, info->var.bits_per_pixel);
++		/*
++		 * LP: a write that ends exactly at the end of the line has
++		 * end % line_length == 0; that is the right edge, not x = 0.
++		 * Without this the rectangle is empty and the write is never
++		 * flushed - a full-width row written on its own stays black.
++		 */
++		if (bit_end)
++			x2 = DIV_ROUND_UP(bit_end, info->var.bits_per_pixel);
++		if (x2 > info->var.xres)
++			x2 = info->var.xres;
+ 	}
+ 
+ 	drm_rect_init(clip, x1, y1, x2 - x1, y2 - y1);

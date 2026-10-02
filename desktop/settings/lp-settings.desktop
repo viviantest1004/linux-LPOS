@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Settings
+Name[ko]=설정
+GenericName=System Settings
+GenericName[ko]=시스템 설정
+Comment=Network, display, sound and power
+Comment[ko]=네트워크, 화면, 소리, 전원을 봅니다
+Exec=lp-settings
+Icon=preferences-system
+Terminal=false
+Categories=System;Settings;GTK;
+Keywords=settings;preferences;network;display;sound;power;language;
+Keywords[ko]=설정;환경설정;네트워크;화면;소리;전원;계정;언어;
+StartupNotify=true
+StartupWMClass=org.lpzero.Settings

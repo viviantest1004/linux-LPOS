@@ -1,0 +1,4 @@
+// LP: keep what an update replaces, so `lp-rollback` can undo it
+// (desktop/system/lp-rollback-save).
+DPkg::Pre-Install-Pkgs { "/usr/lib/lp/lp-rollback-save"; };
+DPkg::Tools::Options::/usr/lib/lp/lp-rollback-save::Version "2";

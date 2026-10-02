@@ -1,0 +1,11 @@
+-- /etc/wireplumber/bluetooth.lua.d/80-lp-no-logind.lua
+--
+-- LP has no systemd-logind. WirePlumber's Bluetooth monitor asks for its
+-- logind module by default (with-logind, so that only the user at the
+-- seat holds the Bluetooth audio profiles), and when the logind monitor
+-- cannot start, WirePlumber gives up as a whole: it connected to PipeWire,
+-- and disconnected again a second later. No WirePlumber, no sound device
+-- set up, and wpctl - which the volume slider and the volume keys use -
+-- had nothing to talk to: no sound and no volume, on every machine.
+-- There is one person at this machine; the monitor runs without it.
+bluez_monitor.properties["with-logind"] = false

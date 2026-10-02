@@ -1,0 +1,29 @@
+drm/atomic-helper: clear ignore_damage_clips when duplicating plane state
+
+Backport of the upstream fix ("drm/damage-helper: Clear
+ignore_damage_clips ..."), not in rpi-6.12.y at kernel/linux.commit.
+
+virtio-gpu (and vmwgfx) set drm_plane_state.ignore_damage_clips in their
+atomic_check when a commit brings a different framebuffer, so that the
+whole new buffer is uploaded. __drm_atomic_helper_plane_duplicate_state()
+memcpy()s the current state into the new one and never clears the flag,
+so once the framebuffer has changed a single time - fbcon's to the
+compositor's, at the first frame of a session - every later commit
+carries it too, and virtio-gpu ignores FB_DAMAGE_CLIPS for good: each
+pointer movement becomes a RESOURCE_FLUSH (and TRANSFER_TO_HOST) of the
+whole 1920x1080 plane. Seen in QEMU with the trace event
+virtio_gpu_cmd_res_flush; this is the pointer lag under UTM.
+
+The flag is meant per commit, like fb_damage_clips beside it, which is
+already cleared here.
+
+--- a/drivers/gpu/drm/drm_atomic_state_helper.c
++++ b/drivers/gpu/drm/drm_atomic_state_helper.c
+@@ -367,6 +367,7 @@
+ 	state->commit = NULL;
+ 	state->fb_damage_clips = NULL;
+ 	state->color_mgmt_changed = false;
++	state->ignore_damage_clips = false;
+ }
+ EXPORT_SYMBOL(__drm_atomic_helper_plane_duplicate_state);
+ 

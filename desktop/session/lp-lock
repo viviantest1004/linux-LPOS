@@ -1,0 +1,74 @@
+#!/bin/sh
+# lp-lock - lock the screen: lp-lockscreen, or swaylock when it cannot.
+#
+# The quick settings panel's lock button, Super+L and a logout all come
+# here. swaylock checks the password through PAM (/etc/pam.d/swaylock),
+# the account's own, the same one sudo asks for.
+#
+# The ring is the theme's: teal while typing, orange on each key, red
+# when the password was wrong. It shows from the start
+# (--indicator-idle-visible): the machine now locks at every boot, and a
+# screen showing only the wallpaper did not say that it wanted a
+# password.
+#
+# An account with no usable password is not locked at all. Try's live
+# account is one ("!" in /etc/shadow, `passwd -S` says L): Log out there
+# brought the session back behind a lock that answered "Wrong" to
+# everything, and the only way on was the power button - the same for
+# the lock button and Super+L. Only when the status cannot be read is
+# the screen locked anyway.
+lp_pw=$(/usr/bin/passwd -S "$(id -un)" 2> /dev/null | awk '{ print $2 }')
+if test -n "$lp_pw" && test "$lp_pw" != P ; then
+    echo "lp-lock: $(id -un) has no password to unlock with ($lp_pw); not locking" >&2
+    # the boot's loading cover waits for a sign-in screen that will not come
+    command -v lp-splash-fade > /dev/null 2>&1 && lp-splash-fade done
+    exit 0
+fi
+
+# The screen itself is lp-lockscreen (desktop/lockscreen): a clock, the
+# account's name and a password box that shows a dot for each key -
+# "--login" words it as signing in, for the start of the machine
+# (lp-shell-start). One lock at a time: a second Super+L while locked
+# finds the lock file held and does nothing.
+#
+# lp-lockscreen keeps the desktop shut with sway's input inhibitor,
+# which lasts only as long as the process does. So it runs in a loop:
+# anything but a clean unlock (exit 0) - a crash, a killed process -
+# locks again at once. Exit 3 means it could not lock at all (no
+# inhibitor, or another program holds it), and swaylock below takes
+# over; so does a lock screen that keeps dying.
+lp_mode=
+test "${1:-}" = --login && lp_mode=--login
+if command -v lp-lockscreen > /dev/null 2>&1 ; then
+    exec 9> "${XDG_RUNTIME_DIR:-/tmp}/lp-lock.lock"
+    flock -n 9 || exit 0
+    lp_tries=0
+    while : ; do
+        lp-lockscreen $lp_mode
+        lp_rc=$?
+        test $lp_rc = 0 && exit 0
+        test $lp_rc = 3 && break
+        lp_tries=$((lp_tries + 1))
+        echo "lp-lock: lp-lockscreen stopped (exit $lp_rc); locking again" >&2
+        test $lp_tries -ge 5 && break
+    done
+fi
+
+WALL=/usr/share/backgrounds/lp/lp-wallpaper-dark-3840x2160.png
+set -- -f --show-failed-attempts --indicator-idle-visible \
+    --color 0B1722 \
+    --inside-color 0B1722CC --inside-clear-color 0B1722CC \
+    --inside-ver-color 16304ACC --inside-wrong-color 3A1414CC \
+    --ring-color 1FB5A8 --ring-ver-color 1FB5A8 --ring-clear-color 9FB3C4 \
+    --ring-wrong-color E8663D --key-hl-color F28C28 --bs-hl-color E8663D \
+    --line-color 00000000 --line-clear-color 00000000 \
+    --line-ver-color 00000000 --line-wrong-color 00000000 \
+    --separator-color 00000000 \
+    --text-color EAF2F8 --text-clear-color EAF2F8 \
+    --text-ver-color EAF2F8 --text-wrong-color EAF2F8 \
+    --indicator-radius 90 --indicator-thickness 8 \
+    --font "Pretendard Variable"
+test -r "$WALL" && set -- "$@" -i "$WALL" -s fill
+# swaylock does not tell the boot's loading cover it is up; told here.
+command -v lp-splash-fade > /dev/null 2>&1 && lp-splash-fade done
+exec swaylock "$@"

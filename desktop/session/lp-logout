@@ -1,0 +1,20 @@
+#!/bin/sh
+# lp-logout - end the session: every window closes, and a fresh session
+# comes up locked, asking for the password.
+#
+# There is no separate login screen on this machine: start-desktop logs
+# the account in at boot. So logging out is "close everything, and let
+# nobody back in without the password" - start-desktop starts the
+# session again when this one ends, and the marker below has
+# lp-shell-start lock it before anything else is on the screen.
+#
+# The compositor is asked to stop with SIGTERM (or swaymsg exit), never
+# SIGKILL: a killed compositor leaves the VT in graphics mode.
+: > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lp-logout"
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *wayfire*|*Wayfire*)
+        pid=$(pidof wayfire)
+        test -n "$pid" && kill -TERM $pid ;;
+    *)
+        swaymsg exit ;;
+esac

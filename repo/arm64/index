@@ -1,0 +1,3 @@
+# name version size sha256 file
+examples 1.0 20480 cd90502bf6c9b4459e79b9be3db6321337c63504edd2bc5df54a0a2c2c3d2191 examples-1.0.tar
+hexdump 1.0 10240 a16eb217273e6ec6ca46f6e1cc404945da77b149c9dd9059ff22ac434e5ee013 hexdump-1.0.tar

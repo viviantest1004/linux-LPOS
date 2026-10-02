@@ -1,0 +1,246 @@
+# /etc/services - the programs init supervises.
+#
+# One per line. init starts each at boot and restarts it when it dies.
+# Comments (#) and blank lines are ignored.
+#
+# How this differs from /etc/rc:
+#   rc        runs once and finishes. Nothing revives what it started.
+#   services  init keeps watching. If it dies, it comes back.
+#
+# The reason the SSH server belongs here is plain: if it died to a bug or
+# to memory pressure, there would be no way left to reach the machine.
+#
+# Something that dies instantly gets a growing delay between restarts,
+# and after 20 failures init gives up on it. That stops a busy loop.
+
+# Log collector - FIRST, because everything below it has something to say.
+#
+#   Collects the kernel ring buffer and the /dev/log socket into
+#   /data/log/messages, rotating at 512KB so it can never fill the card.
+#   Without it, everything printed goes to the console and is gone as
+#   soon as it scrolls. If the board wedges overnight there is no record
+#   of what happened - which is when you most want one.
+#
+#   It used to be seventh in this file, after guard, wpa_supplicant,
+#   dropbear, dhcp, ntp and cron. /dev/log does not exist until logd
+#   creates it, so everything those six said while starting - which is
+#   exactly when things go wrong - had nowhere to go. It has no
+#   dependencies of its own, so there is no reason for it to wait.
+logd
+
+# The safety net. THIS LINE IS THE MOST IMPORTANT ONE IN THE FILE.
+#
+#   guard is what kills a runaway before it takes the board down, what
+#   notices /data filling up, and what pushes a CPU hog to the back of
+#   the queue so SSH still answers. Every one of those defences is this
+#   one process.
+#
+#   It used to be started from /etc/rc, which runs once and finishes.
+#   Nothing revived it. Killing guard therefore disabled the entire
+#   self-defence of the machine permanently, and left no trace: the board
+#   kept running, looked healthy, and was defenceless against the next
+#   thing that went wrong. It was a worse fault than any of the things
+#   guard protects against, because it was silent.
+#
+#   No -d here. init supervises a child that stays in the foreground;
+#   a process that forks and lets the parent exit looks like an instant
+#   death, and init would spend its life restarting it.
+#
+#   init never gives up on this one, however often it fails.
+guard -r 32 -w 64
+
+# WiFi: LP's own, `wpa` (userland/wpa). You talk to it with `lp-net`;
+# `wifi` says at which step a connection stopped and why.
+#
+#   It replaced wpa_supplicant, under which the Pi associated and then
+#   the WPA2 four-way handshake never happened, with every cause outside
+#   wpa_supplicant ruled out. The same daemon runs the XPS's ath10k or
+#   BCM4350 and the Pi's brcmfmac: the kernel's own CONNECT does the
+#   association on both, and the handshake is ours.
+#
+#   No '?' condition any more. The old line asked for /sys/class/net/wlan0
+#   because wpa_supplicant fails at once without it; `wpa` instead waits,
+#   asleep, for any wireless interface to appear - the desktop's is not
+#   called wlan0 (udev names it wlp2s0 or so), and a card whose firmware
+#   loads late would otherwise have been given up on.
+#
+#   Saved networks: /etc/lp-net/networks on the desktop, /data/lp-net/
+#   networks on a board - root-only, written atomically, rejoined at
+#   boot. /etc/wpa.conf, which rc builds from the card's
+#   wpa_supplicant.conf, is still read, so a Pi set up the old way keeps
+#   connecting.
+#
+#   `touch /boot/wpa-debug` on the card, from any PC, still turns on the
+#   frame-by-frame log (`wifi log`), because when the wireless will not
+#   connect there is no other way to ask for it.
+#
+#   THE FALLBACK - wpa_supplicant, kept as the way back. It is switched
+#   by a file, not by editing this line:
+#       /boot/wpa-supplicant       on the card, from any PC
+#       `sudo wifi fallback on`    (/etc/lp-net/fallback or
+#                                   /data/lp-net/fallback)
+#   With either present `wpa -d` becomes wpa_supplicant on the wireless
+#   interface, with /etc/wpa.conf and the saved networks (the file is in
+#   wpa_supplicant's format for this reason), and wpa_cli works. The
+#   service is still called "wpa", so `service restart wpa` applies a
+#   change of the switch. `wifi fallback off` switches back.
+wpa -d
+
+# Power profiles, the battery and the backlight (lp-tune). The only
+# writer of the backlight; it restores the last brightness at boot and
+# answers `lp-tune` and the top bar over its socket. On a board with no
+# battery or backlight it applies what exists and waits.
+?/bin/lp-tune lp-tune -d
+
+# The two root helpers the desktop's apps talk to. Each asks the
+# person's password (sudo group) before it does anything, keeps the
+# answer for five minutes, and takes only validated verbs - never a
+# shell string. lp-privd installs and removes packages (Software), and
+# lp-diskd partitions, formats and checks disks (Disks). A board without
+# the desktop has neither binary and skips both lines.
+?/bin/lp-privd lp-privd -d
+?/bin/lp-diskd lp-diskd -d
+
+# The SSH server.
+#   -F  stay in the foreground. init can only supervise a child that
+#       stays alive; going to the background looks like an instant death.
+#   -R  generate a host key if there is none
+#   -E  log to the console
+#   -r  where the host key lives. On the data partition, so it survives
+#       a reboot and clients do not see the key change.
+# The "?" is not decoration. An image built for a machine we have no
+# dropbear binary for should come up without SSH and say so once, rather
+# than have init try to exec a file that is not there every five seconds
+# for the life of the board.
+?/bin/dropbear dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
+
+# The clock keeper.
+#   This board has no battery-backed clock. Pull the power and time
+#   stops; power it up again and it starts at 1970. That makes file
+#   timestamps nonsense and breaks every HTTPS certificate check.
+#   -d  writes the time to /data/.clock every 30s and resyncs from the
+#       network hourly. /etc/rc restores that value at boot.
+# The DHCP lease has to be renewed or the router takes the address back,
+# and a board that loses its address is off the network with nothing to
+# notice: it has not crashed, so the watchdog is content, and memory and
+# temperature are fine, so guard is content. It was the one failure with
+# no automatic recovery at all - on a system whose whole purpose is
+# being left alone for months.
+#
+# With no interface named it finds the one that answers: wlan0, then a
+# USB Ethernet adapter, then the gadget port.
+dhcp -d
+
+ntp -d
+
+# The instance's own SSH key, on EC2.
+#
+#   On AWS the key is not in the image. It is chosen when the instance is
+#   launched and handed over through 169.254.169.254, so an image that
+#   does not fetch it boots perfectly and is unreachable forever - the
+#   worst failure there is, because nothing is broken and there is
+#   nothing to fix from outside.
+#
+#   The address arrives after rc has finished (dhcp is a service too), so
+#   this waits rather than deciding at boot that there is no metadata
+#   service. On anything that is not EC2 it gives up in two seconds and
+#   sleeps; the link-local address is answered in under a millisecond or
+#   not at all.
+?/bin/ec2 ec2 -d
+
+# Scheduled jobs.
+#
+#   Reads /data/crontab, or /etc/crontab if there is none. With neither
+#   it sleeps rather than exiting - a one-shot that exits would be
+#   restarted by this supervisor every second forever, and "no jobs" is
+#   the normal state for most machines.
+#
+#   Times are UTC. See `cron -h`.
+?/bin/cron cron -d
+
+
+# Watchdog.
+#   The BCM2835 has a hardware countdown that reboots the board when it
+#   reaches zero. The kernel driver was always in the build; nothing was
+#   resetting the timer, so it was never armed and never fired.
+#   Now: if the system wedges hard enough that this stops running, the
+#   board reboots itself in 15 seconds instead of waiting for someone to
+#   walk over and pull the power.
+#   (No watchdog hardware in a VM - it exits with a clear message there.)
+watchdog -t 15
+
+# The heartbeat.
+#   This board is meant to sit somewhere for months with nobody near it,
+#   and there was no way to check whether it was doing that. Finding out
+#   if it was alive meant logging in - and the machine you cannot log
+#   into is exactly the one you wanted to know about. Silence read the
+#   same as health right up until it mattered.
+#   Now it says how it is, on a schedule, to a URL in /boot/beacon.conf.
+#   If the reports stop, that is the signal - which is the only kind
+#   that still works when the failure is "it went away".
+#   With no URL set it still runs and still keeps /data/log/status.json,
+#   which is the record that makes a claim about months of uptime
+#   checkable afterwards rather than something to take on trust.
+beacon -d
+
+# Drives that get plugged in - and the card this system boots from being
+# pulled out of a running board.
+#   Without this, a USB stick or an external disk appears in `disk` and
+#   nowhere else: you have to be logged in, know it came up as sdb1, and
+#   know what filesystem is on it. Nobody plugs a drive into a headless
+#   board and then goes to look up its device name.
+#
+#   -d listens on the kernel's uevent socket - the same messages udev
+#   reads - so a drive is mounted within a moment of being plugged in,
+#   and released when it is pulled. It mounts under /media, never
+#   touches the disk this system booted from, and uses nosuid,nodev
+#   because the filesystem was written by somebody else's machine.
+#
+#   It also runs one scan at startup, so a drive that was already
+#   attached at boot is mounted too.
+#
+#   THE SECOND JOB IS THE IMPORTANT ONE, and it is the reason this line
+#   has to be in this file and not in /etc/rc.
+#
+#   /data is on the SD card, /root is a bind mount off it, /boot is the
+#   other partition on it, and /bin /sbin /lib /usr /opt and /srv are
+#   six overlays whose upper layer is on it. Pull the card out of a
+#   running board and all nine are mounts with no disk under them: the
+#   kernel and the root filesystem are in RAM and perfectly fine, but
+#   every command a person could type is gone, so nothing on the machine
+#   can be started to put it right. It was the one failure with no way
+#   back at all short of pulling the power.
+#
+#   This daemon is the way back, and it works only because it is already
+#   running when the card goes - its own pages come from the RAM root,
+#   and it takes the mounts down with the umount2 syscall rather than by
+#   running /bin/umount, which is on the card that just left. After that
+#   /bin is the system image again and the board is fully usable; put
+#   the card back and it checks it, mounts it and rebuilds the overlays
+#   by itself.
+#
+#   init restarts it if it dies, which is most of why it belongs here.
+#   The one case that cannot be recovered from is this process dying
+#   while the card is out, because init would then have to exec
+#   /bin/automount off the dead card to bring it back - so it does as
+#   little as possible in that state and never exits on its own.
+automount -d
+
+# Watching for the things that actually happen to a small board on the
+# internet.
+#   Not an antivirus - there is no signature database here and one would
+#   not fit. What it looks at instead is what actually gets a board like
+#   this taken: repeated SSH failures from one address, which it blocks;
+#   setuid and world-writable files under /data, which is mounted
+#   nosuid so a setuid file there is either pointless or somebody
+#   testing something; a listening socket that was not there before,
+#   which on a board that has not changed is the single most useful
+#   signal there is; and a new key in authorized_keys, which is how a
+#   board stays lost after it has been found.
+#
+#   A service rather than a thing you remember to run, because the value
+#   is entirely in noticing between the times anybody looks. It sleeps
+#   most of the time; the walk of /data skips the Debian tree and the
+#   CPython install, which are thousands of files that legitimately look
+#   like matches.
+defend -d

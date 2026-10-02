@@ -1,0 +1,6 @@
+# Build products of liblpshell.a: the objects, the archive, and the code
+# wayland-scanner generates from protocols/*.xml on every build.
+*.o
+*.a
+*-client-protocol.h
+*-protocol.c

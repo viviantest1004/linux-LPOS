@@ -1,0 +1,6 @@
+#
+# /etc/pam.d/lp-lockscreen - LP's lock and sign-in screen
+# (desktop/lockscreen). It checks the account's own password and
+# nothing else; pam_unix does that through unix_chkpwd, as the person.
+#
+auth include common-auth

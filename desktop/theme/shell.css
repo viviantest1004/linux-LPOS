@@ -1,0 +1,619 @@
+/* shell.css - the desktop shell: top bar, dock, app grid, desktop icons,
+ * quick settings, lock screen. One file for all of them.
+ *
+ * Installed at /usr/local/share/lp/shell.css and loaded by every shell
+ * component above the application theme (lp-shell.c says why the
+ * priority has to be that high). Applications never see this file;
+ * their look is desktop/theme/gtk-3.0 and gtk-4.0.
+ *
+ * ── where the values come from ──
+ *
+ * Layout is the owner's mockup: a thin dark bar with 현재 활동 and the
+ * focused app on the left and the clock in the middle, a full-height
+ * dock on the left, a quick settings popup under the status icons.
+ * Everything that styles that layout - the greys, the text levels, the
+ * hairlines, the radii, the type scale and its tracking, the shadows -
+ * is the design system on the gui branch (design/gui/lp-ui.css and
+ * lp-type.css), copied as values because GTK 3 CSS has no custom
+ * properties to import them as.
+ *
+ * One value is the mockup's and not the design system's: the accent.
+ * feel.md §5 lists the accent colour as still undecided, and the
+ * mockup's toggles are orange when on, so the accent is that orange.
+ * Amber stays a limit and red stays failure, as §1-3 says.
+ *
+ * ── touch ──
+ *
+ * Every target is at least 48 logical pixels on its short side; on this
+ * machine's 4K panel at scale 2 that is 8.6mm, a fingertip. Nothing
+ * changes on hover that does not also change on press, because a
+ * finger has no hover. :hover rules below exist for the touchpad and
+ * always sit next to an :active rule that does the same thing harder.
+ */
+
+/* Deep blue, teal and orange (the owner's choice, replacing the first
+ * aubergine-and-orange, which read as Ubuntu). The surfaces are blues
+ * from the wallpaper's deep end; the accent is one warm orange; teal is
+ * the second accent, for things that are merely "active". */
+@define-color lp_canvas   #0b1722;
+@define-color lp_panel    #102233;
+@define-color lp_card     #142a40;
+@define-color lp_raised   #1c3b57;
+@define-color lp_line     #24425f;
+@define-color lp_line_soft #1b3450;
+@define-color lp_t1       #eaf2f8;
+@define-color lp_t2       #9fb3c4;
+@define-color lp_t3       #6b8499;
+@define-color lp_t4       #4a6178;
+@define-color lp_amber    #f0b350;
+@define-color lp_red      #f08585;
+@define-color lp_red_surf #2a1616;
+@define-color lp_red_bg   #4a2020;
+@define-color lp_accent   #f28c28;
+@define-color lp_accent_hi #ffa24a;
+@define-color lp_teal     #1fb5a8;
+
+/* ── every shell window ───────────────────────────────────────────── */
+
+window.lp-layer,
+window.lp-layer.background {
+  background-color: transparent;
+  background-image: none;
+  color: @lp_t1;
+}
+
+.lp-layer {
+  font-family: "Pretendard Variable", Pretendard, "Noto Sans CJK KR",
+               "NanumGothic", sans-serif;
+  font-size: 14px;
+  letter-spacing: -0.011em;
+}
+
+/* Buttons in the shell draw nothing until touched: the bar, the dock and
+ * the panel are surfaces with things on them, not rows of raised keys.
+ * The press state is the affordance, and it is the same on every one. */
+.lp-layer button {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  border-radius: 8px;
+  box-shadow: none;
+  color: @lp_t1;
+  text-shadow: none;
+  -gtk-icon-shadow: none;
+  /* Adwaita brightens a hovered button's icon, which re-renders the icon
+   * surface at every crossing - most of the dock's CPU under the pointer
+   * on a machine drawing in software, for an effect the design never had. */
+  -gtk-icon-effect: none;
+  outline-color: transparent;
+  /* No transition here: motion.css (loaded just under this file) gives
+   * every button the press spring - highlight on touch-down in the same
+   * frame, a 91ms fade on release. Saying it again here, more
+   * specifically, is what used to fade the highlight IN as well. */
+}
+.lp-layer button:hover   { background-color: rgba(255, 255, 255, 0.07); }
+.lp-layer button:active,
+.lp-layer button:checked { background-color: rgba(255, 255, 255, 0.14); }
+.lp-layer button:disabled { color: @lp_t4; }
+
+.lp-layer label { color: inherit; }
+
+/* Menus opened by a long press: touch-sized rows. */
+menu.lp-menu, .lp-menu menu, .lp-menu {
+  background-color: @lp_card;
+  border: 1px solid @lp_line;
+  border-radius: 10px;
+  padding: 6px;
+  font-family: "Pretendard Variable", Pretendard, sans-serif;
+  font-size: 15px;
+}
+.lp-menu menuitem {
+  min-height: 48px;
+  min-width: 200px;
+  padding: 0 16px;
+  border-radius: 6px;
+  color: @lp_t1;
+}
+.lp-menu menuitem:hover,
+.lp-menu menuitem:active { background-color: @lp_raised; }
+.lp-menu menuitem.lp-danger label { color: @lp_red; }
+.lp-menu separator { margin: 4px 8px; background-color: @lp_line; min-height: 1px; }
+
+/* ── the top bar ──────────────────────────────────────────────────── */
+
+.lp-bar {
+  background-color: rgba(11, 23, 34, 0.82);
+  min-height: 36px;
+  padding: 0 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.lp-bar button {
+  min-height: 36px;
+  min-width: 48px;
+  padding: 0 12px;
+  border-radius: 20px;
+}
+
+/* The LP menu: the mark, and a menu of the system under it. */
+.lp-bar .lp-activities {
+  font-size: 14px;
+  font-weight: 500;
+  padding: 0 10px;
+}
+/* The overview is open: the button stays lit, the way the status area
+ * does while its panel is open. */
+.lp-bar .lp-activities.lp-open { background-color: rgba(255, 255, 255, 0.14); }
+
+.lp-bar .lp-appname {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.014em;
+  color: @lp_t1;
+  padding: 0 12px;
+}
+
+.lp-bar .lp-clock {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  font-feature-settings: "tnum";
+}
+
+.lp-bar .lp-status { padding: 0 14px; }
+.lp-bar .lp-status.lp-open { background-color: rgba(255, 255, 255, 0.14); }
+.lp-bar .lp-status image { color: @lp_t1; margin: 0 5px; }
+.lp-bar .lp-status label {
+  font-size: 13px;
+  font-feature-settings: "tnum";
+  color: @lp_t2;
+  margin-right: 2px;
+}
+.lp-bar .lp-status .lp-warn { color: @lp_amber; }
+.lp-bar .lp-status .lp-bad  { color: @lp_red; }
+.lp-bar .lp-kbd image { color: @lp_t1; }
+/* The input language, EN or 한: fixed width, so switching does not move
+ * the icons beside it. */
+.lp-bar .lp-lang { min-width: 40px; padding: 0 8px; }
+.lp-bar .lp-lang label {
+  font-size: 13px;
+  font-weight: 700;
+  color: @lp_t1;
+}
+
+/* The calendar under the clock: a sheet (lp-sheet.c) that slides down
+ * from under the bar. The margin is room for its shadow inside the
+ * transparent surface; the sheet paints a picture of the card while it
+ * moves, so the blur below is paid once per opening, not per frame. */
+.lp-cal {
+  background-color: @lp_card;
+  border: 1px solid @lp_line;
+  border-radius: 14px;
+  padding: 14px;
+  margin: 4px 24px 24px 24px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5),
+              0 10px 30px rgba(0, 0, 0, 0.40);
+}
+.lp-cal .lp-cal-day {
+  font-size: 13px;
+  color: @lp_t2;
+  margin: 2px 4px 0 4px;
+}
+.lp-cal .lp-cal-date {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  margin: 0 4px 10px 4px;
+}
+.lp-cal calendar {
+  background-color: transparent;
+  color: @lp_t1;
+  border: none;
+  font-size: 15px;
+  padding: 4px;
+  font-feature-settings: "tnum";
+}
+.lp-cal calendar.header { border: none; background: transparent; }
+.lp-cal calendar.button { color: @lp_t2; min-width: 48px; min-height: 40px; }
+.lp-cal calendar:selected {
+  background-color: @lp_accent;
+  color: #ffffff;
+  border-radius: 20px;
+}
+.lp-cal calendar.highlight { color: @lp_t3; font-weight: 500; }
+.lp-cal button.lp-cal-settings {
+  margin-top: 8px;
+  min-height: 44px;
+  border-radius: 10px;
+  color: @lp_accent_hi;
+  font-weight: 600;
+}
+.lp-cal calendar:indeterminate { color: @lp_t4; }
+
+/* ── the dock ─────────────────────────────────────────────────────── */
+
+/* A floating, rounded, translucent bar centred above the bottom edge.
+ * The margin is room for its shadow inside the transparent surface. */
+.lp-dock {
+  background-color: rgba(16, 34, 51, 0.80);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 18px;
+  padding: 3px 6px;
+  margin: 12px 16px 4px 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.lp-dock button.lp-dock-item {
+  min-width: 46px;
+  min-height: 50px;
+  padding: 0;
+  margin: 2px 1px;
+  border-radius: 12px;
+}
+
+/* A mockup app with nothing installed behind it yet. Present, so the
+ * dock is the shape the owner drew, and dim, so nobody expects it to
+ * open. A tap says which package would fill it. */
+.lp-dock .lp-missing image { opacity: 0.35; }
+
+.lp-dock .lp-dot {
+  min-width: 5px;
+  min-height: 5px;
+  border-radius: 3px;
+  margin-bottom: 2px;
+  background-color: transparent;
+}
+.lp-dock .lp-dot.lp-running { background-color: @lp_t2; }
+.lp-dock .lp-dot.lp-focused { background-color: @lp_accent; min-height: 14px; }
+
+.lp-dock separator {
+  background-color: rgba(255, 255, 255, 0.14);
+  min-width: 1px;
+  margin: 12px 5px;
+}
+
+.lp-dock .lp-grid-button image { color: @lp_t1; }
+.lp-dock .lp-grid-button.lp-open { background-color: rgba(255, 255, 255, 0.14); }
+
+popover.lp-note {
+  background-color: @lp_card;
+  border: 1px solid @lp_line;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+popover.lp-note label { font-size: 14px; color: @lp_t2; }
+popover.lp-note .lp-note-title { font-size: 15px; font-weight: 600; color: @lp_t1; }
+popover.lp-note .lp-mono {
+  font-family: "D2Coding", monospace;
+  color: @lp_t1;
+  font-size: 14px;
+}
+
+/* ── the app grid ─────────────────────────────────────────────────── */
+
+/* The grid's backdrop (the canvas at 94%) is painted by lp-appgrid
+ * itself, at the opening spring's opacity; a background here would be
+ * painted a second time on top of it. */
+.lp-grid {
+  background-color: transparent;
+}
+
+.lp-grid entry.lp-search {
+  min-height: 48px;
+  min-width: 480px;
+  padding: 0 18px;
+  border-radius: 24px;
+  border: 1px solid @lp_line;
+  background-color: @lp_card;
+  background-image: none;
+  box-shadow: none;
+  color: @lp_t1;
+  caret-color: @lp_t1;
+  font-size: 16px;
+}
+.lp-grid entry.lp-search:focus { border-color: #f28c28; background-color: #16304a; }
+.lp-grid entry.lp-search image { color: @lp_t3; }
+
+.lp-grid .lp-section {
+  font-size: 13px;
+  color: @lp_t3;
+  margin: 8px 0 4px 0;
+}
+
+.lp-grid flowbox, .lp-grid flowboxchild,
+.lp-grid scrolledwindow, .lp-grid viewport {
+  background-color: transparent;
+  padding: 0;
+}
+.lp-grid flowboxchild { border-radius: 16px; }
+.lp-grid flowboxchild:selected,
+.lp-grid flowboxchild:focus { background-color: transparent; outline: none; }
+
+.lp-grid button.lp-tile {
+  min-width: 144px;
+  min-height: 136px;
+  padding: 10px 8px;
+  border-radius: 16px;
+}
+.lp-grid button.lp-tile label {
+  font-size: 14px;
+  color: @lp_t1;
+  margin-top: 8px;
+}
+
+.lp-grid .lp-empty { font-size: 15px; color: @lp_t3; margin-top: 40px; }
+
+/* ── desktop icons ───────────────────────────────────────────────── */
+
+.lp-desktop button.lp-desk-item {
+  min-width: 104px;
+  min-height: 104px;
+  padding: 8px 4px;
+  border-radius: 10px;
+}
+.lp-desktop button.lp-desk-item label {
+  font-size: 13px;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  margin-top: 4px;
+}
+
+/* ── quick settings ──────────────────────────────────────────────── */
+
+/* The margin is room for the shadow inside the transparent surface. */
+.lp-quick {
+  background-color: @lp_card;
+  border: 1px solid @lp_line;
+  border-radius: 16px;
+  padding: 14px;
+  margin: 4px 12px 24px 24px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5),
+              0 2px 8px rgba(0, 0, 0, 0.28),
+              0 12px 32px rgba(0, 0, 0, 0.46);
+}
+
+.lp-quick .lp-slider-row { min-height: 48px; }
+.lp-quick .lp-slider-row image { color: @lp_t1; margin: 0 6px 0 4px; }
+.lp-quick .lp-slider-row label.lp-pct {
+  font-size: 13px;
+  color: @lp_t2;
+  min-width: 44px;
+  font-feature-settings: "tnum";
+}
+
+.lp-quick scale { padding: 0 6px; min-height: 48px; }
+.lp-quick scale trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: #24425f;
+  border: none;
+}
+.lp-quick scale highlight {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: @lp_t1;
+  border: none;
+}
+.lp-quick scale slider {
+  min-width: 24px;
+  min-height: 24px;
+  margin: -9px;
+  border-radius: 12px;
+  background-color: #ffffff;
+  background-image: none;
+  border: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.lp-quick scale:disabled highlight { background-color: @lp_t4; }
+.lp-quick scale:disabled slider { background-color: @lp_t3; }
+
+.lp-quick button.lp-row {
+  min-height: 48px;
+  padding: 0 8px;
+  border-radius: 10px;
+}
+.lp-quick button.lp-row image { color: @lp_t1; margin-right: 10px; }
+.lp-quick .lp-row .lp-row-title { font-size: 14px; font-weight: 500; }
+.lp-quick .lp-row .lp-row-value {
+  font-size: 13px;
+  color: @lp_t2;
+  font-feature-settings: "tnum";
+}
+.lp-quick .lp-row .lp-chev { color: @lp_t3; margin: 0 0 0 8px; }
+
+.lp-quick .lp-meters { margin: 6px 8px 8px 8px; }
+.lp-quick .lp-meter-name {
+  font-size: 13px;
+  color: @lp_t2;
+  min-width: 56px;
+}
+.lp-quick .lp-meter-val {
+  font-size: 13px;
+  color: @lp_t2;
+  min-width: 44px;
+  font-feature-settings: "tnum";
+}
+.lp-quick progressbar { min-height: 22px; }
+.lp-quick progressbar trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: #24425f;
+  border: none;
+}
+.lp-quick progressbar progress {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: @lp_t1;
+  border: none;
+}
+.lp-quick progressbar.lp-hot progress { background-color: @lp_amber; }
+
+/* The four tiles. Orange when on, as in the mockup: the accent is the
+ * one colour that means "active" (§1-3), and these are the only on/off
+ * controls in the panel. */
+.lp-quick button.lp-tile {
+  min-height: 52px;
+  padding: 0 14px;
+  border-radius: 26px;
+  background-color: @lp_raised;
+}
+.lp-quick button.lp-tile:hover  { background-color: #21405e; }
+.lp-quick button.lp-tile:active { background-color: #28496a; }
+.lp-quick button.lp-tile label { font-size: 14px; font-weight: 500; }
+.lp-quick button.lp-tile image { margin-right: 8px; }
+.lp-quick button.lp-tile.lp-on { background-color: @lp_accent; color: #ffffff; }
+.lp-quick button.lp-tile.lp-on:hover  { background-color: @lp_accent_hi; }
+.lp-quick button.lp-tile.lp-on:active { background-color: #d9731a; }
+.lp-quick button.lp-tile.lp-on label,
+.lp-quick button.lp-tile.lp-on image { color: #ffffff; }
+
+.lp-quick separator {
+  background-color: @lp_line;
+  min-height: 1px;
+  margin: 10px 4px;
+}
+
+.lp-quick .lp-user { min-height: 48px; padding: 0 8px; }
+.lp-quick .lp-user label { font-size: 15px; font-weight: 600; }
+.lp-quick .lp-avatar {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 16px;
+  background-color: #3a5a78;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  margin-right: 12px;
+}
+
+.lp-quick button.lp-action {
+  min-height: 48px;
+  padding: 0 12px;
+  border-radius: 10px;
+}
+.lp-quick button.lp-action label { font-size: 14px; }
+.lp-quick button.lp-action.lp-danger label { color: @lp_red; font-weight: 500; }
+
+/* The Wi-Fi list, when its row is opened. */
+.lp-quick .lp-nets { margin: 0 0 4px 0; }
+.lp-quick .lp-nets button { min-height: 48px; padding: 0 8px 0 36px; }
+.lp-quick .lp-nets label { font-size: 14px; }
+.lp-quick .lp-nets .lp-dim { color: @lp_t3; font-size: 13px; }
+.lp-quick .lp-nets entry {
+  min-height: 44px;
+  border-radius: 8px;
+  background-color: @lp_panel;
+  border: 1px solid @lp_line;
+  color: @lp_t1;
+  padding: 0 12px;
+  margin: 4px 0 4px 36px;
+}
+.lp-quick .lp-msg { font-size: 13px; color: @lp_t3; margin: 4px 8px 4px 36px; }
+.lp-quick .lp-msg.lp-bad { color: @lp_red; }
+
+/* ── the confirm dialog (로그아웃 / 다시 시작 / 전원 끄기) ────────────── */
+
+.lp-dim-bg { background-color: rgba(0, 0, 0, 0.55); }
+
+.lp-dialog {
+  background-color: @lp_panel;
+  border: 1px solid @lp_line;
+  border-radius: 16px;
+  padding: 24px 24px 18px 24px;
+  min-width: 400px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28), 0 18px 52px rgba(0, 0, 0, 0.46);
+}
+.lp-dialog .lp-dialog-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+}
+.lp-dialog .lp-dialog-body {
+  font-size: 14px;
+  color: @lp_t2;
+  margin: 8px 0 18px 0;
+}
+.lp-dialog button {
+  min-height: 48px;
+  min-width: 120px;
+  border-radius: 10px;
+  background-color: @lp_raised;
+  font-size: 14px;
+  font-weight: 500;
+}
+.lp-dialog button:hover { background-color: #21405e; }
+.lp-dialog button:active { background-color: #28496a; }
+.lp-dialog button.lp-go { background-color: @lp_t1; color: #0b1722; }
+.lp-dialog button.lp-go label { color: #0b1722; }
+.lp-dialog button.lp-go.lp-danger { background-color: @lp_red_bg; }
+.lp-dialog button.lp-go.lp-danger label { color: #ffd0d0; }
+
+/* ── the lock screen / login ─────────────────────────────────────── */
+
+.lp-lock {
+  background-color: #0b1722;
+  background-image: radial-gradient(circle farthest-corner at 20% 15%,
+                                    #177585 0%, #12476e 38%, #07121f 100%);
+}
+.lp-lock .lp-lock-time {
+  font-size: 96px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: #ffffff;
+  font-feature-settings: "tnum";
+}
+.lp-lock .lp-lock-date {
+  font-size: 20px;
+  color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 56px;
+}
+.lp-lock .lp-lock-avatar {
+  min-width: 96px;
+  min-height: 96px;
+  border-radius: 48px;
+  background-color: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: 40px;
+  font-weight: 600;
+}
+.lp-lock .lp-lock-name {
+  font-size: 22px;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 14px 0 16px 0;
+}
+.lp-lock entry {
+  min-height: 52px;
+  min-width: 320px;
+  border-radius: 26px;
+  padding: 0 20px;
+  font-size: 16px;
+  background-color: rgba(0, 0, 0, 0.35);
+  background-image: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: none;
+  color: #ffffff;
+  caret-color: #ffffff;
+}
+.lp-lock entry:focus { border-color: rgba(255, 255, 255, 0.45); }
+.lp-lock entry.lp-wrong { border-color: @lp_red; }
+.lp-lock button.lp-go {
+  min-width: 52px;
+  min-height: 52px;
+  border-radius: 26px;
+  margin-left: 10px;
+  background-color: rgba(255, 255, 255, 0.16);
+}
+.lp-lock button.lp-go:active { background-color: rgba(255, 255, 255, 0.28); }
+.lp-lock .lp-lock-msg { font-size: 14px; color: rgba(255, 255, 255, 0.75); margin-top: 14px; min-height: 20px; }
+.lp-lock .lp-lock-msg.lp-bad { color: #ffb0b0; }
+.lp-lock button.lp-corner {
+  min-width: 56px;
+  min-height: 56px;
+  border-radius: 28px;
+  margin: 18px;
+  background-color: rgba(0, 0, 0, 0.25);
+}
+.lp-lock button.lp-corner image { color: #ffffff; }
+.lp-lock button.lp-corner:active { background-color: rgba(255, 255, 255, 0.20); }

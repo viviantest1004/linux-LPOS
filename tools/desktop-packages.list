@@ -1,0 +1,273 @@
+# desktop-packages.list - every Debian package the amd64 desktop asks for by name.
+#
+# The desktop root is a Debian bookworm base with our userland laid over
+# it (tools/mkdesktop.sh says why). For a long time the answer to "what
+# is in that base" lived in two throwaway scripts at the top of the base
+# directory itself, outside the repository, and the only complete record
+# was `apt-mark showmanual` on the one machine that had built it. This
+# file is that record, in the repository, and tools/apply-packages.sh is
+# the only thing that installs from it.
+#
+# One package per line; `#` starts a comment. Only the packages somebody
+# asked for are here, not what they pull in - apt resolves the rest, and
+# a list of 900 names nobody chose is a list nobody can review. The
+# packages debootstrap itself put down (coreutils, dpkg, libc6 ...) are
+# not listed either: they are the base, not a choice.
+#
+# Installed with --no-install-recommends. A Recommends in Debian is a
+# guess about what most people want next, and on this image each guess
+# is disk and download that nobody reviewed.
+
+# ── the session (shell-design-spec.md 8) ─────────────────────────────
+sway
+swayidle
+swaylock
+wayfire
+xwayland
+waybar
+fuzzel
+foot
+# The terminal (kgx): GTK 4, the same title bar as every other window.
+gnome-console
+mako-notifier
+wl-clipboard
+wtype
+grim
+slurp
+wlr-randr
+wlsunset
+playerctl
+brightnessctl
+libnotify-bin
+dbus-x11
+xdg-desktop-portal
+xdg-desktop-portal-gtk
+xdg-desktop-portal-wlr
+# Flatpak, for the applications Debian does not package (Discord,
+# Spotify, Zoom, Chrome, VS Code, Steam ...) and newer versions of the
+# ones it does: the Software app installs them from Flathub through
+# lp-privd. bubblewrap, which it pulls in, is its sandbox; that needs
+# the kernel's user namespaces, and the document portal needs FUSE
+# (kernel/lp-zero-amd64.fragment).
+flatpak
+xdg-utils
+desktop-file-utils
+shared-mime-info
+gnome-themes-extra
+papirus-icon-theme
+xkb-data
+
+# ── the platform under it: devices, seat, bus, disks, sound ──────────
+udev
+seatd
+dbus
+policykit-1
+udisks2
+gvfs
+gvfs-backends
+gvfs-fuse
+pipewire
+pipewire-pulse
+wireplumber
+pavucontrol
+alsa-utils
+upower
+# Bluetooth: bluetoothd and bluetoothctl. The XPS's QCA6174/BCM4350
+# combo cards carry a Bluetooth controller on USB; without bluez it is
+# there and nothing can talk to it. bluetoothd is started from
+# /etc/services, not by this package (there is no systemd to start it).
+bluez
+
+# ── applications (apps-and-settings.md 3-1) ─────────────────────────
+# gedit and eog stand in for what bookworm does not have yet
+# (gnome-text-editor is here too; loupe is not packaged for bookworm).
+firefox-esr
+gedit
+gnome-text-editor
+eog
+evince
+gnome-calculator
+gnome-clocks
+file-roller
+mpv
+gthumb
+drawing
+baobab
+gnome-disk-utility
+gnome-font-viewer
+ffmpeg
+gstreamer1.0-libav
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-bad
+# The owner's list of everyday apps (the other OS's screenshot): an
+# office suite - documents, spreadsheets, slides - drawn with GTK so it
+# looks like everything else, in Korean too; a code editor; a partition
+# manager beside GNOME Disks; a system monitor; a window for mpv.
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress
+libreoffice-gtk3
+libreoffice-l10n-ko
+geany
+gparted
+gnome-system-monitor
+celluloid
+# Korean from a real keyboard: fcitx5 with the Hangul engine (두벌식 by
+# default). The on-screen keyboard has its own Hangul composer; this is
+# for the XPS's keyboard. Started by lp-shell-start when installed.
+fcitx5
+fcitx5-hangul
+fcitx5-frontend-gtk3
+fcitx5-frontend-gtk4
+fcitx5-config-qt
+# Qt's Wayland platform: without it every Qt program (the input method's
+# settings above among them) stopped at "could not find the Qt platform
+# plugin wayland" and never opened a window.
+qtwayland5
+
+# ── type ─────────────────────────────────────────────────────────────
+fonts-dejavu-core
+fonts-nanum
+fonts-nanum-coding
+fonts-noto-color-emoji
+# Hangul in the interface. Nanum covers Korean text in documents, but
+# the UI font stack falls back through Noto, and without the CJK set a
+# Korean label in a GTK dialog can come out as boxes. Checked with
+# `fc-list :lang=ko`.
+fonts-noto-cjk
+
+# ── language and time ────────────────────────────────────────────────
+locales
+tzdata
+
+# ── the port table ───────────────────────────────────────────────────
+# /etc/services is glibc's getservbyname() table, and on a Debian
+# system netbase owns it (with /etc/protocols beside it). Our init's
+# list of supervised programs used to sit at that path; it now lives at
+# /etc/lp/services (init and `service` read it there first), so the
+# name can go back to meaning what every other program expects.
+netbase
+
+# ── what a person expects to find at a prompt (the owner's list) ─────
+# apt talks to deb.debian.org over https; without ca-certificates the
+# machine can verify nothing it downloads and `apt update` fails on the
+# first boot. It was missing from the base until this list existed.
+ca-certificates
+openssh-client
+curl
+rsync
+git
+vim
+nano
+tmux
+screen
+htop
+tree
+ncdu
+file
+plocate
+zip
+unzip
+man-db
+at
+python3-pip
+bsdextrautils
+
+# ── network ──────────────────────────────────────────────────────────
+iproute2
+dnsutils
+traceroute
+iputils-tracepath
+iputils-ping
+iw
+rfkill
+# WPA3. LP's own daemon (userland/wpa) does WPA2-PSK's handshake; a
+# network that takes only WPA3 (SAE) or requires protected management
+# frames is handed, for that one connection, to Debian's wpa_supplicant,
+# which does both (wpa.c, "WPA3"). Around Korean homes most networks are
+# WPA3 now - phones' hotspots, the ISPs' routers.
+wpasupplicant
+
+# ── hardware and power ───────────────────────────────────────────────
+pciutils
+usbutils
+kmod
+lm-sensors
+# Intel's thermal daemon: keeps a Skylake laptop (the XPS 9550's
+# i7-6700HQ) under its limits with RAPL and powerclamp before the BIOS's
+# own emergency throttling does it harder - Ubuntu runs it on the same
+# machine. lp-tune does what power-profiles-daemon would (the profiles);
+# this is the part it does not. Started by init (tools/mkdesktop.sh).
+thermald
+acpi
+powertop
+
+# ── firmware for every other machine ─────────────────────────────────
+# What the modules of kernel/lp-desktop-amd64.fragment load from
+# /lib/firmware: Radeon and Intel graphics (i915's also goes into the
+# kernel's initramfs, tools/mkdisk.sh), NVIDIA for nouveau, the Wi-Fi and
+# Bluetooth of Intel, Realtek, MediaTek, Qualcomm/Atheros, Broadcom and
+# Marvell, the laptop speaker amplifiers (Cirrus), and Intel's sound DSP.
+# From bookworm-backports (tools/apply-packages.sh pins firmware-* there).
+# Left out: server NICs, Qualcomm phone SoCs, capture cards.
+firmware-amd-graphics
+firmware-intel-graphics
+firmware-nvidia-graphics
+firmware-iwlwifi
+firmware-realtek
+firmware-mediatek
+firmware-atheros
+firmware-brcm80211
+firmware-libertas
+firmware-cirrus
+firmware-intel-sound
+firmware-intel-misc
+firmware-misc-nonfree
+firmware-sof-signed
+
+# ── disks: what the installer runs, and what a person mounts ─────────
+# lp-install partitions with sfdisk (fdisk), makes the EFI partition
+# with mkfs.vfat (dosfstools) and copies the root with rsync. efibootmgr
+# is not used by the installer - it writes the boot entry itself - but
+# it is how a person reads and repairs one.
+fdisk
+gdisk
+parted
+e2fsprogs
+dosfstools
+exfatprogs
+ntfs-3g
+efibootmgr
+# The disks track's partition manager (lp-diskd) and the recovery
+# partition's tools: resizing FAT, btrfs, LUKS2, disk health, and the
+# compressor the recovery's reinstall payload is packed with.
+fatresize
+btrfs-progs
+cryptsetup
+smartmontools
+nvme-cli
+zstd
+
+# ── graphics (the fonts-and-graphics track's list) ───────────────────
+# Mesa's GL (iris) is already here as a dependency of the desktop. These
+# add Vulkan, hardware video decode for the HD 530 - intel-media's iHD
+# driver, from non-free, because Skylake's HEVC and VP9 decode is only
+# in that build - and the two tools that say whether either works.
+mesa-vulkan-drivers
+intel-media-va-driver-non-free
+vainfo
+mesa-utils
+
+# ── building on the machine ──────────────────────────────────────────
+# The desktop programs link against this base's GTK 4.8, so they are
+# built in it. Keeping the compiler on the image costs about 200MB and
+# makes the machine able to rebuild its own applications.
+gcc
+make
+pkg-config
+libc6-dev
+libgtk-4-dev
+libgtk-3-dev
+libgtk-layer-shell-dev
+python3-gi
+gir1.2-gtk-3.0

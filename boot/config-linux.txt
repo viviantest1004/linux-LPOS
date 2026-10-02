@@ -1,0 +1,78 @@
+# config-linux.txt - 리눅스를 부팅할 때의 GPU 설정.
+#
+# 베어메탈 펌웨어용 config.txt 와는 별개다.
+# tools/mksdcard.sh --linux 가 이 파일을 config.txt 로 복사한다.
+
+# ── 필수 ────────────────────────────────────────────────────────
+arm_64bit=1
+
+# 우리가 빌드한 커널. config.mk 의 LINUX_IMAGE 와 일치해야 한다.
+kernel=test_a_123_LPzero2W_linux.img
+
+# Zero 2 W 용 디바이스 트리.
+# start.elf 가 이걸 읽어 메모리 크기·시리얼 번호 등을 패치한 뒤
+# 커널에 넘긴다. 그래서 QEMU 에서는 같은 방식이 통하지 않는다.
+device_tree=bcm2710-rpi-zero-2-w.dtb
+
+# ── 시리얼 콘솔 ─────────────────────────────────────────────────
+enable_uart=1
+
+# ★ 중요: Zero 2 W 는 PL011(ttyAMA0)이 기본적으로 블루투스에 물려 있고
+# 40핀 헤더의 GPIO14/15 에는 미니 UART(ttyS0)가 나온다.
+# 우리 커널은 미니 UART 드라이버(8250)를 껐으므로, 이 오버레이로
+# 블루투스를 떼어내 PL011 을 헤더 핀으로 돌려야 콘솔이 나온다.
+# 이게 없으면 부팅은 되는데 시리얼에 아무것도 안 보인다.
+dtoverlay=disable-bt
+
+# ── USB (유선 네트워크) ─────────────────────────────────────────
+# Zero 2 W 에는 이더넷 포트가 없다. micro USB 로 대신한다.
+#
+# dr_mode=otg 이면 케이블에 따라 자동으로 정해진다:
+#   OTG 젠더 + USB 이더넷 어댑터  -> 호스트 모드 (진짜 랜선)
+#   PC 에 그냥 연결               -> 가젯 모드 (PC 와 USB 네트워크)
+#
+# 자동 판별이 안 되면 dr_mode 를 host 나 peripheral 로 고정한다.
+# ★ 반드시 "USB" 라고 인쇄된 포트에 꽂아야 한다. PWR IN 은 전원 전용이다.
+dtoverlay=dwc2,dr_mode=otg
+
+# ── HDMI ────────────────────────────────────────────────────────
+# hdmi_force_hotplug: drive the HDMI output even when the firmware
+# cannot read a monitor on it at power-on.
+#
+# Without this the Pi decides at boot whether anything is plugged in,
+# and if the answer is no it never turns the output on - so a monitor
+# switched on after the board, a cheap adapter or a passive HDMI switch
+# all produce a completely dark screen on a board that is running
+# perfectly. There is no way to tell that apart from a board that did
+# not boot, which is the worst kind of failure to hand somebody.
+#
+# The cost is that the output is driven with nothing attached, which on
+# this board is a few milliamps.
+hdmi_force_hotplug=1
+
+# If the screen is still dark, the sledgehammer is
+#
+#   hdmi_safe=1
+#
+# which forces 640x480 at maximum compatibility and ignores the
+# monitor's EDID entirely. It is ugly and it works on everything. Add
+# it here, on the FAT partition, from any PC.
+#
+# And to find out whether the GPU is driving the output at all, take
+# out disable_splash=1 below: the rainbow square is drawn by the
+# firmware before Linux starts, so seeing it means the HDMI path works
+# and the problem is later.
+
+# ── 부팅 시간 ───────────────────────────────────────────────────
+disable_splash=1
+boot_delay=0
+
+# ── 메모리 분할 ─────────────────────────────────────────────────
+# 프레임버퍼를 아직 안 쓰므로 최소값. 화면을 켤 때 64 로 올린다.
+# The GPU firmware carves the HDMI framebuffer out of this. 16MB is
+# enough for a headless board but leaves no room for a 1080p console
+# (1920x1080x4 = 8.3MB plus the firmware's own working memory), and the
+# screen can come up blank. 32MB fits it with room to spare, and costs
+# 16MB of the 512MB the ARM side gets. We use no video decoding and no
+# 3D, so nothing else needs this memory.
+gpu_mem=32

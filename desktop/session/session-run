@@ -1,0 +1,301 @@
+#!/bin/sh
+# The session itself, already running as uid 1000.
+#
+# ── 계정 이름이 lp 에서 user 로 바뀐 이유 ──
+#
+# 데비안 베이스에는 lp 라는 시스템 계정이 이미 있다. uid 7, 프린터
+# 스풀의 주인이고 base-passwd 가 만든다. 데스크탑 계정을 lp 라고
+# 부르면 /etc/passwd 에 같은 이름이 두 줄 생기고, getpwnam("lp") 은
+# 먼저 나오는 uid 7 을 돌려준다 - 세션이 홈도 셸도 잘못된 계정으로
+# 뜨는데 오류는 한 줄도 나지 않는다.
+#
+# The account is read from /etc/passwd rather than assumed: the
+# installer names it after the person (and leaves /home/user as a link,
+# which made every path here work while Files titled the home "user").
+LP_ENT=$(awk -F: '$3 == 1000 { print $1 ":" $6 ":" $7; exit }' /etc/passwd)
+LP_USER=${LP_ENT%%:*}
+LP_HOME=${LP_ENT#*:}; LP_HOME=${LP_HOME%%:*}
+LP_SHELL=${LP_ENT##*:}
+test -n "$LP_USER" || LP_USER=user
+test -d "$LP_HOME" || LP_HOME=/home/user
+export USER=$LP_USER LOGNAME=$LP_USER
+# /bin before /usr/bin: at the prompt a person gets our commands, and
+# GNU's stay reachable as /usr/bin/X (tools/lp-base/fixup.sh).
+export PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/sbin
+export XDG_RUNTIME_DIR=/run/user/1000
+export HOME=$LP_HOME
+export XDG_CONFIG_HOME=$LP_HOME/.config
+export XDG_DATA_HOME=$LP_HOME/.local/share
+# wireplumber 는 여기에 마지막 볼륨과 기본 장치를 적는다. 없으면
+# 만들지 못하고, 어떤 판에서는 그것으로 그냥 나가 버린다.
+export XDG_STATE_HOME=$LP_HOME/.local/state
+export XDG_CACHE_HOME=$LP_HOME/.cache
+# F11 joined Super+F as the full-screen key. A home made before that
+# keeps its own copy of the shortcuts, so the old default there is
+# brought up to the new one (a shortcut the person changed is left be).
+if grep -qx 'toggle_fullscreen = <super> KEY_F' "$XDG_CONFIG_HOME/wayfire.ini" 2> /dev/null ; then
+    sed -i 's/^toggle_fullscreen = <super> KEY_F$/toggle_fullscreen = <super> KEY_F | KEY_F11/' \
+        "$XDG_CONFIG_HOME/wayfire.ini"
+    if test -f "$XDG_CONFIG_HOME/sway/lp-keys.conf" &&
+       ! grep -q '^bindcode --no-warn 95 ' "$XDG_CONFIG_HOME/sway/lp-keys.conf" ; then
+        echo 'bindcode --no-warn 95 fullscreen toggle' >> "$XDG_CONFIG_HOME/sway/lp-keys.conf"
+    fi
+fi
+# The touchpad's right click is two fingers pressed down (1.407). A home
+# made before that has no click_method at all, and libinput's default
+# on the XPS's clickpad is the bottom-right corner, where two fingers
+# are a left click - the right click "did not work" on an installed
+# machine while it did on a fresh one. Settings > Touch & mouse writes
+# the line when the person picks either way, so a line that is there
+# is theirs and is left as it is. GNU sed for the "a" command.
+if test -f "$XDG_CONFIG_HOME/wayfire.ini" &&
+   ! grep -q '^click_method' "$XDG_CONFIG_HOME/wayfire.ini" ; then
+    /usr/bin/sed -i '/^\[input\]$/a click_method = clickfinger' "$XDG_CONFIG_HOME/wayfire.ini"
+fi
+if test -f "$XDG_CONFIG_HOME/sway/config" &&
+   ! grep -q 'click_method' "$XDG_CONFIG_HOME/sway/config" ; then
+    /usr/bin/sed -i '/^input type:touchpad {$/a\    click_method clickfinger\n    tap_button_map lrm' "$XDG_CONFIG_HOME/sway/config"
+fi
+# 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
+# 못하고 빈 창이 뜬다.
+# Flatpak's exports come after /usr/local/share (LP's own overrides stay
+# first) and before /usr/share: an application installed from Flathub
+# through the Software app shows up in the app grid and the dock, with
+# its icon, the moment it is installed (both watch GAppInfoMonitor).
+export XDG_DATA_DIRS=/usr/local/share:/var/lib/flatpak/exports/share:/usr/share
+export XDG_CONFIG_DIRS=/etc/xdg
+export GTK_THEME=LP
+# Every GTK window draws its own title bar - the same minimise, maximise
+# and close buttons, in the same place, as the apps with a header bar.
+# Without it a GTK 3 window with no header bar (LibreOffice, Geany,
+# GParted) asked the compositor for a frame instead: sway's has no
+# buttons at all and wayfire's looks different, so the buttons changed
+# from one app to the next.
+export GTK_CSD=1
+# ... which GTK 3 on Wayland ignores in favour of the compositor's say:
+# lp-csd hides the protocol that says "server" (desktop/csd/lp-csd.c).
+if [ -f /usr/local/lib/liblp-csd.so ]; then
+    export LD_PRELOAD=/usr/local/lib/liblp-csd.so
+fi
+# Qt programs on Wayland directly, X (Xwayland) only when that fails.
+export QT_QPA_PLATFORM="wayland;xcb"
+export XDG_SESSION_TYPE=wayland
+export XKB_DEFAULT_LAYOUT=us
+# Which compositor was decided by start-desktop, as root, from the
+# graphics card (see there): wayfire with 3D graphics, sway without.
+# ~/.config/lp/compositor (wayfire, sway or auto) is the person's own
+# override. The environment each one needs is set further down, in
+# run_compositor, because a failed wayfire start falls back to sway.
+LP_COMPOSITOR=sway
+if test -s /run/lp-session/compositor ; then
+    read -r LP_COMPOSITOR < /run/lp-session/compositor
+fi
+if test -s "$LP_HOME/.config/lp/compositor" && ! test -e /run/lp-session/safe ; then
+    read -r want < "$LP_HOME/.config/lp/compositor"
+    case $want in wayfire|sway) LP_COMPOSITOR=$want ;; esac
+fi
+# Safe mode (start-desktop): sway on the CPU, and the person told so.
+if test -e /run/lp-session/safe ; then
+    LP_COMPOSITOR=sway
+    export LP_SAFE_MODE=1
+fi
+command -v wayfire > /dev/null 2>&1 || LP_COMPOSITOR=sway
+# The keyboard, the mouse and the touchscreen from the first moment.
+#
+# wlroots 0.15 will not start with no input device at all ("libinput
+# initialization failed, no input devices") unless WLR_LIBINPUT_NO_DEVICES
+# is 1 - and with it set, it also skips reading the devices it did find
+# at start (backend/libinput/backend.c). They wait in libinput's queue
+# until something makes its descriptor readable: the first key press or
+# mouse movement. Until then the compositor has no keyboard and no pointer
+# - in a wayfire VM the USB tablet and keyboard were attached 78 s after
+# login, and not at all until the mouse moved - so there is no pointer on
+# the screen and nothing that asks whether a keyboard is there hears yes.
+# Newer wlroots reads them at start either way.
+#
+# So the switch is set only for the case it exists for: udev knows of no
+# input device yet. Its database is what libinput reads, and it is
+# world-readable.
+if grep -qs '^E:ID_INPUT=1' /run/udev/data/c13:* ; then
+    unset WLR_LIBINPUT_NO_DEVICES
+else
+    export WLR_LIBINPUT_NO_DEVICES=1
+fi
+# The pointer is drawn by the compositor itself (a software cursor) in
+# every virtual machine - except sway under KVM (run_sway) - and real
+# GPUs keep their cursor plane. LP's wlroots can put it on the virtual
+# GPU's cursor plane (WLR_DRM_CURSOR_HOTSPOT=1, desktop/compositor/
+# wlroots-0.15.1-lp.patch); drawn by wayfire with OpenGL the host showed
+# it upside down, and under UTM the host's pointer followed it and fed
+# back into the guest's. The drivers are the ones virtual_gpu() in
+# lp-autoscale knows.
+for lp_drv in /sys/class/drm/card*/device/driver ; do
+    case $(basename "$(readlink -f "$lp_drv")") in
+        virtio_gpu|virtio-pci|virtio_pci|qxl|bochs-drm|bochs|cirrus|cirrus-qemu|vmwgfx|vboxvideo)
+            export WLR_NO_HARDWARE_CURSORS=1 ;;
+    esac
+done
+unset lp_drv WLR_DRM_CURSOR_HOTSPOT
+export GDK_BACKEND=wayland
+# The pointer's theme and size for everything that loads a cursor itself
+# (Xwayland apps, the compositors' defaults): the same 16 as GTK
+# (desktop/theme/settings.ini) and sway's seat, 32 pixels at scale 2.
+# Settings > Accessibility (or Touch & mouse) keeps the person's choice in
+# ~/.config/lp/accessibility.conf (cursor_size=N); that wins.
+export XCURSOR_THEME=Adwaita
+XCURSOR_SIZE=16
+if test -s "$LP_HOME/.config/lp/accessibility.conf" ; then
+    lp_cs=$(sed -n 's/^cursor_size=\([0-9][0-9]*\)$/\1/p' "$LP_HOME/.config/lp/accessibility.conf" | tail -n 1)
+    case $lp_cs in ''|*[!0-9]*) ;; *) XCURSOR_SIZE=$lp_cs ;; esac
+fi
+export XCURSOR_SIZE
+# The terminal's shell: the account's own (lpsh, with its line editor,
+# prompt and history), or /bin/sh if passwd names something that cannot
+# run - foot once read /bin/false there and opened nothing.
+case $LP_SHELL in
+    */false|*/nologin|"") LP_SHELL=/bin/sh ;;
+esac
+test -x "$LP_SHELL" || LP_SHELL=/bin/sh
+export SHELL=$LP_SHELL
+# 로케일.
+#
+# 이 기계의 기본 언어는 영어다. 한국어는 이미지에 같이 들어 있고
+# (locale-gen 이 ko_KR.UTF-8 을 만들어 둔다), 설정 앱의 '지역과 언어'
+# 에서 고르면 아래 파일에 적힌다.
+#
+# 파일이 /etc/default/locale 이 아니라 홈에 있는 이유: 이 화면은
+# 표준 계정으로도 열려야 하고, 언어를 바꾸자고 관리자 권한을 물을
+# 이유가 없다. 계정마다 다른 언어를 쓸 수도 있다.
+#
+# LC_MESSAGES 까지 같이 내보내는 이유는 fuzzel 과 GTK 가 .desktop 의
+# Name[ko] 를 고를 때 그것을 보기 때문이다. LANG 만 두면 비어 있는
+# LC_MESSAGES 가 C 로 확정되는 경로가 있어서, 앱 이름만 영어로 남는다.
+LP_LOCALE=en_US.UTF-8
+if test -s "$LP_HOME/.config/lp/locale" ; then
+    read LP_LOCALE < "$LP_HOME/.config/lp/locale"
+fi
+export LANG=$LP_LOCALE
+export LC_MESSAGES=$LP_LOCALE
+export EDITOR=edit
+# 접근성 버스는 이 기계에 없다. 없다고 말해 두지 않으면 앱마다
+# 한 문단씩 경고를 찍는데, 그건 고장이 아니다.
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
+cd "$LP_HOME"
+
+# ── the compositor ──
+#
+# sway: software rendering, deliberately. A virtual machine has no GPU:
+# wlroots would pick the GLES renderer, fail to bring EGL up against a
+# virtio_gpu with no 3D, and segfault - which reads as "the desktop is
+# broken" rather than "there is no graphics card here". pixman draws on
+# the CPU. GTK 4 is told to use cairo for the same reason: it asks for
+# OpenGL first, and left to discover there is none it prints a warning
+# per app and falls back anyway.
+#
+# wayfire: the graphics card draws everything, GTK 4 included.
+#
+# A wayfire that dies within 20 seconds of starting did not start (a
+# driver the check in start-desktop thought had 3D, and has not); the
+# session then goes on under sway, and ~/.cache/lp/wayfire.log says why.
+under_kvm() {
+    grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource
+}
+
+# Under KVM, on virtio-gpu (with 3D or without): the pointer on the GPU's
+# cursor plane, drawn by the host, as it is for GNOME - moving it sends
+# no frame of the screen at all - and one pixel of damage for a commit
+# where only the pointer moved (desktop/compositor/wlroots-0.15.1-lp.patch,
+# 6.-8.). With the software cursor every motion of the mouse was a new
+# frame, and virt-manager's SPICE with OpenGL showed the screen flickering
+# with trails where the pointer or a window moved.
+#
+# $1 is the renderer. An image wayfire draws with OpenGL reaches the host
+# upside down (virglrenderer flips every cursor it reads back), so it is
+# drawn flipped (WLR_DRM_CURSOR_FLIP_Y); pixman's (sway) arrives upright.
+# UTM keeps the software cursor: its host moved its own pointer after the
+# plane, which moved the guest's.
+kvm_cursor_plane() {
+    under_kvm || return 0
+    for lp_drv in /sys/class/drm/card*/device/driver ; do
+        case $(basename "$(readlink -f "$lp_drv")") in
+            virtio_gpu|virtio-pci|virtio_pci)
+                unset WLR_NO_HARDWARE_CURSORS
+                export WLR_DRM_CURSOR_HOTSPOT=1 WLR_DRM_MIN_DAMAGE=1 WLR_DRM_CURSOR_DIRECT=1
+                if test "$1" = gl; then
+                    export WLR_DRM_CURSOR_FLIP_Y=1
+                else
+                    unset WLR_DRM_CURSOR_FLIP_Y
+                fi ;;
+        esac
+    done
+    unset lp_drv
+}
+
+run_sway() {
+    export XDG_CURRENT_DESKTOP=sway:wlroots
+    # The CPU draws every frame here: the shell's springs become short
+    # fades (lp-motion's reduced motion), which is most of the smoothness
+    # a slow machine or an emulated one can actually show. Under KVM the
+    # CPU is the host's own, and the shell keeps its motion.
+    under_kvm || export LP_REDUCE_MOTION=1
+    export WLR_RENDERER=pixman
+    export WLR_RENDERER_ALLOW_SOFTWARE=1
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GSK_RENDERER=cairo
+    kvm_cursor_plane pixman
+    exec /usr/bin/sway
+}
+
+run_compositor() {
+    if test "$LP_COMPOSITOR" = wayfire ; then
+        kvm_cursor_plane gl
+        mkdir -p "$XDG_CACHE_HOME/lp"
+        log="$XDG_CACHE_HOME/lp/wayfire.log"
+        test -f "$log" && mv -f "$log" "$log.old"
+        # Korean from the laptop's keyboard. Under sway lp-osk is the input
+        # method for the physical keys too (osk/type.c); wayfire 0.7 never
+        # sends keys to an input method's keyboard grab, so there fcitx5
+        # (with its Hangul engine) takes them instead, through GTK's and
+        # Qt's own fcitx modules, which do not need the grab. Right Alt is
+        # the Hangul key (wayfire.ini's korean:ralt_hangul), Ctrl+Space too.
+        if command -v fcitx5 > /dev/null 2>&1 ; then
+            export GTK_IM_MODULE=fcitx QT_IM_MODULE=fcitx XMODIFIERS=@im=fcitx SDL_IM_MODULE=fcitx
+        fi
+        # In a virtual machine (virgl) the 3D is the host's GL passed
+        # through - on a Mac, UTM's goes on through ANGLE to Metal - and
+        # GTK 4's GL renderer there was the one thing that did not answer
+        # clicks (Settings) while GTK 3 windows, which draw with cairo into
+        # shared memory, did. cairo draws GTK 4 the same way. A real GPU
+        # keeps GL.
+        case $(sed -n 2p /run/lp-session/compositor 2> /dev/null) in
+            *virtio*) export GSK_RENDERER=cairo ;;
+        esac
+        read -r t0 _ < /proc/uptime
+        XDG_CURRENT_DESKTOP=Wayfire:wlroots /usr/bin/wayfire \
+            -c "$XDG_CONFIG_HOME/wayfire.ini" > "$log" 2>&1
+        code=$?
+        read -r t1 _ < /proc/uptime
+        if test $(( ${t1%.*} - ${t0%.*} )) -ge 20 ; then
+            exit $code
+        fi
+        echo "session-run: wayfire stopped after $(( ${t1%.*} - ${t0%.*} ))s (exit $code); starting sway instead" >> "$log"
+    fi
+    run_sway
+}
+
+if test "${1:-}" = --compositor ; then
+    run_compositor
+fi
+
+# dbus-run-session 으로 감싸는 이유.
+#
+# GTK 앱은 세션 버스 없이도 뜨지만, 세션 버스가 없으면 파일 선택
+# 대화상자(portal), 알림, 클립보드 관리자, 그리고 gnome-* 앱들의
+# 설정 저장(dconf)이 전부 조용히 실패한다. 앱은 뜨는데 저장이 안 되는
+# 상태가 제일 나쁘다.
+#
+# dbus-run-session 은 버스를 하나 띄우고 DBUS_SESSION_BUS_ADDRESS 를
+# 넣은 채로 아래 명령을 돌린 뒤, 그 명령이 끝나면 버스도 같이 정리한다.
+# 별도로 데몬을 관리할 것이 없다.
+exec dbus-run-session -- /bin/session-run --compositor

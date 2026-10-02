@@ -1,0 +1,535 @@
+#!/usr/bin/python3
+"""lp-setup-gate - decide, at every boot, whether the desktop or a setup comes up.
+
+/etc/rc starts /bin/start-desktop once the system is up. On the amd64
+desktop image that name is this program (tools/mkdesktop.sh puts it
+there, and the session's own start-desktop at
+/usr/lib/lp/start-desktop.session). It looks for two files:
+
+    /etc/lp/installer-medium   this root is the USB stick: run the
+                               installer (lp-installer)
+    /etc/lp/firstboot          this root was just installed: run the
+                               first-boot setup (lp-firstboot) once
+
+and when neither is there - every boot after the first - it hands over
+to the session at once, having done nothing but set the machine's name.
+
+Why a gate and not a line in the session:
+
+  - sway will not run as root ("Unable to drop root ... refusing to
+    start"), and a setup has to partition disks, write /etc/shadow and
+    set the clock's zone - root's work. So the windows run as uid 1000 in
+    a kiosk compositor (one fullscreen window, no shortcuts, no bar), and
+    this program stays root beside them, answering a short list of
+    requests on a Unix socket that only uid 1000 can open
+    (/run/lp-setup/sock, checked again with SO_PEERCRED). The windows
+    reach it through lp-setup-run, which they call exactly as they would
+    call lp-install or lp-net: the gate points LP_INSTALL and LP_NET at
+    relay links, so the same window runs unprivileged against a mock in
+    a test rig and privileged here, with no code of its own for either.
+
+  - What a request may do is decided here, not by the window: in the
+    installer, lp-install list|check|install; at first boot, lp-install
+    list|check|configure; in both, lp-net's scan|status|connect|forget|
+    radio and power off|restart. Nothing else runs, and no request is a
+    shell string.
+
+  - The kiosk sits on the theme's deep blue (#0b1722) and the
+    windows fade their card in on it, so the boot reads as firmware
+    logo, splash, setup - with no text console and no desktop flashing
+    past in between.
+
+Two things happen here on every boot, setup or not, because this is the
+last thing /etc/rc starts: the kernel's hostname is set from /etc/hostname
+(rc still names every machine linux-lp, and the name a person chose at
+install time has to be the one the prompt and the network show), and the
+boot menu's count of unconfirmed boots is reset (lp-reboot-recovery
+--boot-ok, boot-recovery track) - a boot that got this far worked.
+"""
+
+import fcntl
+import json
+import os
+import pwd
+import grp
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+SESSION = "/usr/lib/lp/start-desktop.session"
+MEDIUM = "/etc/lp/installer-medium"
+FIRSTBOOT = "/etc/lp/firstboot"
+RUN = "/run/lp-setup"
+SOCK = RUN + "/sock"
+RELAY = "/usr/local/lib/lp/relay"
+LOG = "/var/log/lp-setup.log"
+KIOSK_UID = 1000
+EXIT_TRY = 10            # lp-installer: "Try LP without installing"
+
+LP_INSTALL = "/usr/local/bin/lp-install"
+
+
+def log(*words):
+    line = "%s lp-setup-gate: %s\n" % (time.strftime("%H:%M:%S"), " ".join(map(str, words)))
+    try:
+        with open(LOG, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def first_existing(*paths):
+    return next((p for p in paths if os.path.exists(p)), None)
+
+
+def set_hostname():
+    try:
+        with open("/etc/hostname") as f:
+            name = f.read().strip()
+        if name:
+            with open("/proc/sys/kernel/hostname", "w") as f:
+                f.write(name)
+    except OSError:
+        pass
+
+
+def to_session():
+    """Everything is set up: the ordinary desktop, as rc expected."""
+    if os.access(SESSION, os.X_OK):
+        os.execv(SESSION, [SESSION])
+    log("no session at", SESSION)
+    sys.exit(0)
+
+
+# ── what a window may ask for ─────────────────────────────────────────
+
+def allowed(mode, argv):
+    """The command to run for a request, or None. argv[0] is a name, not
+    a path: the path is chosen here."""
+    if not argv or not all(isinstance(a, str) and "\0" not in a for a in argv):
+        return None
+    name, rest = argv[0], argv[1:]
+    if name == "lp-install" and rest:
+        verbs = {"list", "check"} | ({"install"} if mode == "installer" else {"configure"})
+        if rest[0] in verbs:
+            if rest[0] == "configure" and "--root" in rest:
+                return None          # the running system, nothing else
+            return [LP_INSTALL] + rest
+    if name == "lp-net" and rest and rest[0] in ("scan", "status", "connect", "forget", "radio"):
+        exe = first_existing("/bin/lp-net", "/usr/local/bin/lp-net")
+        return [exe] + rest if exe else None
+    if name == "power" and rest in (["off"], ["restart"]):
+        exe = first_existing("/bin/lp-power")
+        if exe:
+            return [exe, rest[0]]
+        return ["/sbin/poweroff" if rest[0] == "off" else "/sbin/reboot"]
+    return None
+
+
+def serve_one(conn, mode):
+    try:
+        cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _pid, uid, _gid = struct.unpack("3i", cred)
+        if uid not in (0, KIOSK_UID):
+            return
+        f = conn.makefile("rwb", buffering=0)
+        req = json.loads(f.readline().decode() or "{}")
+        argv = allowed(mode, req.get("argv"))
+        if not argv:
+            f.write(b"X 126 not allowed\n")
+            log("refused", req.get("argv"))
+            return
+        log("run", argv[0], *(a for a in argv[1:] if not a.startswith("--password")))
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, env={
+                                 "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                 "LANG": "C.UTF-8", "HOME": "/root"})
+        stdin = req.get("stdin") or ""
+        try:
+            p.stdin.write(stdin.encode())
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+        for line in iter(p.stdout.readline, b""):
+            f.write(b"O " + line if line.endswith(b"\n") else b"O " + line + b"\n")
+        rc = p.wait()
+        f.write(b"X %d\n" % rc)
+        log("exit", argv[0], rc)
+    except (OSError, ValueError) as e:
+        log("request failed:", e)
+    finally:
+        conn.close()
+
+
+def serve(sock, mode):
+    while True:
+        try:
+            conn, _ = sock.accept()
+        except OSError:
+            return
+        threading.Thread(target=serve_one, args=(conn, mode), daemon=True).start()
+
+
+# ── the kiosk ─────────────────────────────────────────────────────────
+
+def output_scale():
+    """2 on the XPS's 3840x2160 panel, 1 on anything under 2560 wide -
+    a virtual machine's 1280x800 at scale 2 would not fit the window."""
+    best = 0
+    base = "/sys/class/drm"
+    try:
+        for n in os.listdir(base):
+            try:
+                with open(os.path.join(base, n, "modes")) as f:
+                    first = f.readline().strip()
+                w = int(first.split("x")[0])
+                best = max(best, w)
+            except (OSError, ValueError):
+                pass
+    except OSError:
+        pass
+    return 2 if best >= 2560 else 1
+
+
+def prepare_devices():
+    # What logind would hand a session and nothing here does (the
+    # session's own start-desktop does the same).
+    # Owner uid 1000 and 0660, not 0666: open to everyone, any process
+    # could read the keys typed into the installer - the passwords.
+    for pat in ("/dev/dri", "/dev/input", "/dev/snd"):
+        try:
+            for n in os.listdir(pat):
+                p = os.path.join(pat, n)
+                if not os.path.isdir(p):
+                    try:
+                        os.chown(p, KIOSK_UID, -1)
+                        os.chmod(p, 0o660)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    vt_keyboard_off()
+
+
+def vt_keyboard_off():
+    """The keyboard of the VT under the kiosk off, the VT in graphics
+    mode - what libseat's built-in backend tries and, as uid 1000 without
+    the VT as its controlling terminal, is not allowed to do. Otherwise
+    every key typed into the setup windows is also typed into the VT,
+    where init runs /bin/login (/etc/lp/console-login): the password
+    chosen on the account page arrived there as a login name, in clear
+    text on tty1's screen. start-desktop does the same for the session
+    and gives the VT its keyboard back if the session cannot start."""
+    try:
+        with open("/sys/class/tty/tty0/active") as f:
+            vt = f.read().strip()
+        fd = os.open("/dev/" + vt, os.O_RDWR | os.O_NOCTTY)
+        try:
+            fcntl.ioctl(fd, 0x4B45, 4)       # KDSKBMODE, K_OFF
+            fcntl.ioctl(fd, 0x4B3A, 1)       # KDSETMODE, KD_GRAPHICS
+        finally:
+            os.close(fd)
+    except OSError as e:
+        log("could not take the keyboard from the VT:", e)
+
+
+def virtual_gpu():
+    """A virtual machine's display adapter (the list session-run keeps)."""
+    import glob
+    for card in glob.glob("/sys/class/drm/card[0-9]*"):
+        try:
+            drv = os.path.basename(os.path.realpath(card + "/device/driver"))
+        except OSError:
+            continue
+        if drv in ("virtio_gpu", "virtio-pci", "virtio_pci", "qxl", "bochs-drm", "bochs",
+                   "cirrus", "cirrus-qemu", "vmwgfx", "vboxvideo"):
+            return True
+    return False
+
+
+def virtio_gpu():
+    """The display is virtio-gpu (QEMU/KVM's, UTM's), with or without 3D."""
+    import glob
+    for card in glob.glob("/sys/class/drm/card[0-9]*"):
+        drv = os.path.basename(os.path.realpath(card + "/device/driver"))
+        if drv in ("virtio_gpu", "virtio-pci", "virtio_pci"):
+            return True
+    return False
+
+
+def gpu_3d():
+    """A GPU that draws in 3D: the same test start-desktop makes for the
+    session (i915 and friends, or virtio-gpu that the host gave virgl)."""
+    import glob
+    for card in glob.glob("/sys/class/drm/card[0-9]*"):
+        try:
+            drv = os.path.basename(os.path.realpath(card + "/device/driver"))
+        except OSError:
+            continue
+        if drv in ("i915", "xe", "amdgpu", "radeon", "nouveau", "vmwgfx"):
+            return True
+        if drv in ("virtio_gpu", "virtio-pci", "virtio_pci"):
+            try:
+                out = subprocess.run(["dmesg"], capture_output=True, text=True).stdout
+            except OSError:
+                out = ""
+            if "features: +virgl" in out:
+                return True
+    return False
+
+
+# The renderer the kiosk's sway draws with: pixman (the CPU), on every
+# machine. It used to be GL wherever there was 3D, for a cursor on the
+# cursor plane - but a virtual GPU hides that plane from a compositor
+# without the hotspot capability anyway (Linux 6.8+), and GL through
+# virgl is the one part of the kiosk that depends on the host's graphics
+# stack: under KVM with 3D acceleration the installer froze mid-way and
+# the machine fell back to the boot splash (sway had lived past the
+# 10-second test below, so nothing switched to pixman). With LP's wlroots
+# a pixman frame for a pointer movement is a cursor-sized upload. GL only
+# when the gate is started with LP_KIOSK_RENDERER=gles2 (for testing).
+RENDERER = None
+
+
+def kiosk(mode):
+    """Run the setup window in a kiosk sway as uid 1000; return its
+    exit status."""
+    global RENDERER
+    if RENDERER is None:
+        RENDERER = "gles2" if os.environ.get("LP_KIOSK_RENDERER") == "gles2" else "pixman"
+    pw = pwd.getpwuid(KIOSK_UID)
+    xdg = "/run/user/%d" % KIOSK_UID
+    home = RUN + "/home"
+    for d, mode_, owner in ((xdg, 0o700, KIOSK_UID), (home, 0o700, KIOSK_UID)):
+        os.makedirs(d, exist_ok=True)
+        os.chown(d, owner, pw.pw_gid)
+        os.chmod(d, mode_)
+    prepare_devices()
+
+    app = "/usr/local/bin/lp-installer" if mode == "installer" else "/usr/local/bin/lp-firstboot"
+    # Written by the kiosk's own shell, as uid 1000 - so in its runtime
+    # directory, not in /run/lp-setup, which is root's.
+    status = xdg + "/lp-setup-status"
+    try:
+        os.unlink(status)
+    except FileNotFoundError:
+        pass
+    osk = "exec /usr/local/bin/lp-osk\n" if os.access("/usr/local/bin/lp-osk", os.X_OK) else ""
+    # The keyboard layout chosen so far, if any (sway nags about an
+    # include that is not there, and a nag bar is the one thing a kiosk
+    # must not show).
+    inc = os.path.join(pw.pw_dir, ".config/sway/input.conf")
+    inc = "include %s\n" % inc if os.path.isfile(inc) else ""
+    cfg = RUN + "/sway.cfg"
+    with open(cfg, "w") as f:
+        f.write(
+            "# lp-setup-gate's kiosk: one window, nothing else to press.\n"
+            "output * bg #0b1722 solid_color\n"
+            "output * scale %d\n"
+            "default_border none\n"
+            "default_floating_border none\n"
+            "focus_follows_mouse no\n"
+            "swaynag_command -\n"
+            "input type:touchpad {\n    tap enabled\n    natural_scroll enabled\n}\n"
+            "%s"
+            "for_window [app_id=\"org.lp.*\"] fullscreen enable\n"
+            # The VM window resized: follow it (lp-autoscale --watch).
+            "exec /usr/local/bin/lp-autoscale --watch\n"
+            "%s"
+            "exec sh -c '%s; echo $? > %s; swaymsg exit'\n"
+            % (output_scale(), inc, osk, app, status))
+    os.chmod(cfg, 0o644)
+
+    env = {
+        "PATH": "/bin:/usr/local/bin:/usr/bin:/sbin:/usr/sbin",
+        "HOME": home, "USER": pw.pw_name, "LOGNAME": pw.pw_name,
+        "XDG_RUNTIME_DIR": xdg, "XDG_CONFIG_HOME": home + "/.config",
+        "XDG_CACHE_HOME": home + "/.cache", "XDG_DATA_DIRS": "/usr/local/share:/usr/share",
+        "XDG_CURRENT_DESKTOP": "sway", "XDG_SESSION_TYPE": "wayland",
+        # The compositor draws with RENDERER (above); the window itself
+        # with cairo on the CPU either way, which is the same on every
+        # machine.
+        "WLR_RENDERER": RENDERER, "WLR_RENDERER_ALLOW_SOFTWARE": "1",
+        "GSK_RENDERER": "cairo", "GDK_BACKEND": "wayland",
+        # The windows are drawn for a dark card on #0e0e0e; Adwaita's light
+        # defaults under them left some text dark-on-dark.
+        "GTK_THEME": "Adwaita:dark",
+        "XKB_DEFAULT_LAYOUT": "us", "NO_AT_BRIDGE": "1", "GTK_A11Y": "none",
+        "LANG": setup_lang(), "LP_SETUP_MODE": mode,
+        # The windows' backends, through the relay (see the top).
+        "LP_INSTALL": RELAY + "/lp-install", "LP_NET": RELAY + "/lp-net",
+        "LP_POWER": RELAY + "/power",
+    }
+    # The seat: left to libseat, exactly as the desktop session leaves it,
+    # because that is the arrangement that works on this machine. Two
+    # earlier attempts both failed "Timeout waiting session to become
+    # active" and fell through to the desktop after three tries: starting
+    # a private seatd for uid 1000 (it never became active without a VT
+    # session), and forcing LIBSEAT_BACKEND=noop.
+    seatd = None
+    # Like start-desktop, open the GPU, the input devices and the first
+    # virtual terminals to uid 1000: libseat's built-in backend opens a
+    # VT to switch to, and without /dev/tty* it failed "Could not open
+    # target tty: Permission denied" at boot (it worked from a root shell
+    # later only because the session had already opened them).
+    # The VTs are also owned by uid 1000, as in start-desktop: the root
+    # shell init puts on tty1 runs /root/.profile's `mesg n`, which takes
+    # the group and other write bits back (0666 -> 0644) and leaves only
+    # the owner's.
+    for dev in ["/dev/dri/card0", "/dev/dri/renderD128",
+                "/dev/tty0", "/dev/tty1", "/dev/tty2"] + \
+            ["/dev/input/event%d" % i for i in range(32)]:
+        try:
+            os.chown(dev, KIOSK_UID, -1)
+            os.chmod(dev, 0o620 if dev.startswith("/dev/tty") else 0o660)
+        except OSError:
+            pass
+
+    groups = [g.gr_gid for g in grp.getgrall()
+              if g.gr_name in ("video", "input", "render", "audio", "netdev")]
+
+    def child():
+        os.setgroups(groups)
+        os.setgid(pw.pw_gid)
+        os.setuid(KIOSK_UID)
+        os.chdir(home)
+
+    if RENDERER == "pixman":
+        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    # The pointer, as in the session (session-run's run_sway says why):
+    # under KVM on virtio-gpu, on the GPU's cursor plane, drawn by the
+    # host, with one buffer for the screen and one pixel of damage when
+    # only the pointer moved; in every other virtual machine a software
+    # cursor.
+    try:
+        with open("/sys/devices/system/clocksource/clocksource0/available_clocksource") as f:
+            kvm = "kvm-clock" in f.read()
+    except OSError:
+        kvm = False
+    env.pop("WLR_DRM_SINGLE_BUFFER", None)
+    if kvm and RENDERER == "pixman" and virtio_gpu():
+        env.pop("WLR_NO_HARDWARE_CURSORS", None)
+        env["WLR_DRM_CURSOR_HOTSPOT"] = "1"
+        env["WLR_DRM_MIN_DAMAGE"] = "1"
+        env["WLR_DRM_CURSOR_DIRECT"] = "1"
+    else:
+        env.pop("WLR_DRM_CURSOR_HOTSPOT", None)
+        if virtual_gpu():
+            env["WLR_NO_HARDWARE_CURSORS"] = "1"
+    log("kiosk", mode, "scale", output_scale(), "renderer", RENDERER)
+    started = time.time()
+    with open(LOG, "a") as out:
+        splash_stop()
+        p = subprocess.Popen(["/usr/bin/sway", "-c", cfg], env=env, preexec_fn=child,
+                             stdout=out, stderr=out, stdin=subprocess.DEVNULL)
+        p.wait()
+    if RENDERER != "pixman" and time.time() - started < 10 and not os.path.exists(status):
+        log("sway with", RENDERER, "stopped at once; pixman from now on")
+        RENDERER = "pixman"
+    if seatd:
+        seatd.terminate()
+        seatd.wait()
+    try:
+        with open(status) as f:
+            return int(f.read().strip() or "1")
+    except (OSError, ValueError):
+        return 1
+
+
+def setup_lang():
+    """The language the window opens in: the one chosen at install time
+    for the first boot, English for the stick."""
+    try:
+        with open(FIRSTBOOT) as f:
+            for ln in f:
+                if ln.startswith("lang=") and ln[5:].strip():
+                    return ln[5:].strip()
+    except OSError:
+        pass
+    return "en_US.UTF-8"
+
+
+def boot_ok():
+    """Tell the boot menu this boot came up (lpboot.efi's LPBootCount: two
+    unconfirmed boots in a row and it preselects Recovery). Here, because
+    this is the last thing /etc/rc starts: a boot that got this far has a
+    root, an init and a working userland."""
+    exe = first_existing("/bin/lp-reboot-recovery", "/usr/local/bin/lp-reboot-recovery",
+                         "/usr/local/sbin/lp-reboot-recovery")
+    if exe:
+        subprocess.run([exe, "--boot-ok"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+
+
+def splash_stop():
+    """The boot screen holds until told; told just before sway takes the
+    screen (start-desktop does the same for the desktop)."""
+    if os.access("/bin/splash", os.X_OK):
+        try:
+            subprocess.run(["/bin/splash", "stop"], timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def main():
+    set_hostname()
+    boot_ok()
+    if os.path.exists(MEDIUM):
+        mode = "installer"
+    elif os.path.exists(FIRSTBOOT):
+        mode = "firstboot"
+    else:
+        to_session()
+        return
+
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    os.makedirs(RUN, exist_ok=True)
+    os.chmod(RUN, 0o755)
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(SOCK)
+    os.chown(SOCK, KIOSK_UID, -1)
+    os.chmod(SOCK, 0o600)
+    sock.listen(4)
+    threading.Thread(target=serve, args=(sock, mode), daemon=True).start()
+
+    # A window that crashes gets two more chances; after that the
+    # desktop comes up anyway, because a machine that loops on a broken
+    # setup screen is a machine nobody can get into.
+    for attempt in range(3):
+        rc = kiosk(mode)
+        log("window exited", rc)
+        if mode == "installer" and rc == EXIT_TRY:
+            break
+        if mode == "firstboot" and not os.path.exists(FIRSTBOOT):
+            break
+        if rc == 0 and mode == "installer":
+            # Done, but the person chose neither restart nor power off.
+            continue
+    sock.close()
+    try:
+        os.unlink(SOCK)
+    except OSError:
+        pass
+    # The person has just chosen the password on the screen before this
+    # one: the session that follows does not ask for it again at once
+    # (lp-shell-start). /run is gone at the next boot, and with it this.
+    if mode == "firstboot" and not os.path.exists(FIRSTBOOT):
+        try:
+            os.makedirs("/run/lp-session", exist_ok=True)
+            open("/run/lp-session/just-set-up", "w").close()
+        except OSError:
+            pass
+    to_session()
+
+
+if __name__ == "__main__":
+    main()

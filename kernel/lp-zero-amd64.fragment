@@ -1,0 +1,711 @@
+# lp-zero-amd64.fragment - what an ordinary PC needs that a Pi does not.
+#
+# This is the only file to edit for the amd64 kernel. It is merged LAST,
+# after the arm64 answers, so everything here wins without a list of
+# exceptions to keep in step. Maintaining that list by hand went wrong
+# three times - no console, no graphics, no sound - each time because a
+# line that is right for a Raspberry Pi was read after the line that was
+# right here.
+#
+# One case "last wins" does not cover: a choice (compression, -O2 or
+# -Os, the default governor) where the Pi picked a different member.
+# Kconfig then takes this file's member, but the Pi's "=y" for the other
+# one is still the last word on THAT symbol, and kernel/build.sh's check
+# reports it as not applied on every build. So where this file picks a
+# different member, it also says =n to the Pi's.
+
+CONFIG_64BIT=y
+CONFIG_X86_64=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=8
+CONFIG_MICROCODE=y
+CONFIG_X86_MCE=y
+CONFIG_ACPI=y
+CONFIG_PM=y
+
+# ── boot ──
+# One bzImage with the EFI stub inside it, so "copy it to EFI/BOOT" is
+# the whole story on a PC and in a VM alike. tty0 first and ttyS0 last:
+# printk goes to every console listed, but /dev/console - where init
+# puts the login shell - is the last one, and a VM run headless has no
+# screen to put it on.
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_RELOCATABLE=y
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="console=tty0 console=ttyS0,115200"
+
+# ── console ──
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_8250_PCI=y
+CONFIG_SERIAL_8250_NR_UARTS=4
+CONFIG_VT=y
+CONFIG_VT_CONSOLE=y
+CONFIG_UNIX98_PTYS=y
+
+# ── storage ──
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+CONFIG_ATA=y
+CONFIG_ATA_PIIX=y
+CONFIG_SATA_AHCI=y
+CONFIG_BLK_DEV_NVME=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_SCSI=y
+# virtio-scsi and Hyper-V storage are "low-level" SCSI drivers, and the
+# Pi config switches that whole menu off - so these two lines were in
+# this file and not in the kernel, which the build's own check said on
+# every build. The menu's other drivers all default to off.
+CONFIG_SCSI_LOWLEVEL=y
+CONFIG_SCSI_VIRTIO=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PCI=y
+
+# ── the clock ──
+# A PC and an EC2 instance both have a battery-backed clock that keeps
+# running while the machine is off. The kernel had the driver but not
+# RTC_HCTOSYS, which is the part that actually reads it at boot - so the
+# clock started at 1970 every time and the only thing standing between
+# that and a working HTTPS handshake was the timestamp we saved at the
+# last shutdown. That number does not advance while the power is off, so
+# a machine switched on a week later thought a week had not passed.
+#
+# SYSTOHC writes the other way, but only for a kernel that believes its
+# clock is synchronised; `date -s`, `ntp` and `hwclock -w` write the RTC
+# themselves rather than hoping.
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_HCTOSYS_DEVICE="rtc0"
+CONFIG_RTC_SYSTOHC=y
+CONFIG_RTC_INTF_DEV=y
+CONFIG_RTC_DRV_CMOS=y
+
+# ── Amazon EC2 ──
+# Nitro instances (everything from m5/c5 on) present their network card
+# as ENA and their disk as NVMe. Without the ENA driver the instance
+# boots, finds no network device at all, and there is no way in to see
+# why - the console shows a system that came up perfectly and cannot be
+# reached. DIMLIB is ENA's adaptive interrupt moderation and the build
+# fails without it.
+#
+# The older Xen generations (t2, m4) are still rented out and use
+# netfront/blkfront instead, so both are here.
+# CONFIG_ETHERNET has to be turned back on here. The arm64 config sets
+# it to n on purpose - a Pi Zero 2 W has no ethernet port, only WiFi -
+# and this file is that config plus this fragment, so without this line
+# the whole drivers/net/ethernet menu is skipped and every driver below
+# is silently dropped. That is not a theory: the image built before this
+# had CONFIG_E1000, CONFIG_R8169 and CONFIG_ENA_ETHERNET written in this
+# very file and none of them in the built kernel. On a real PC it had no
+# network card at all, and on EC2 it had no way in.
+CONFIG_ETHERNET=y
+CONFIG_NET_VENDOR_AMAZON=y
+CONFIG_NET_VENDOR_INTEL=y
+CONFIG_NET_VENDOR_REALTEK=y
+CONFIG_NET_VENDOR_BROADCOM=y
+CONFIG_TIGON3=y
+CONFIG_ENA_ETHERNET=y
+CONFIG_DIMLIB=y
+CONFIG_XEN=y
+CONFIG_XEN_PV=y
+CONFIG_XEN_PVHVM=y
+CONFIG_XEN_BLKDEV_FRONTEND=y
+CONFIG_XEN_NETDEV_FRONTEND=y
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+
+# ── virtual machines ──
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_VIRTIO_BALLOON=y
+CONFIG_VIRTIO_INPUT=y
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_KVM_GUEST=y
+CONFIG_VMWARE_VMCI=y
+CONFIG_HYPERV=y
+CONFIG_HYPERV_STORAGE=y
+CONFIG_HYPERV_NET=y
+
+# ── network ──
+CONFIG_E1000=y
+CONFIG_E1000E=y
+CONFIG_R8169=y
+CONFIG_8139CP=y
+CONFIG_IGB=y
+CONFIG_USB_USBNET=y
+CONFIG_USB_NET_CDCETHER=y
+
+# ── USB ──
+CONFIG_USB_SUPPORT=y
+CONFIG_USB=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_OHCI_HCD=y
+CONFIG_USB_UHCI_HCD=y
+CONFIG_USB_STORAGE=y
+
+# ── randomness ──
+# getrandom() feeds the update signature check and the DNS resolver.
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_VIRTIO=y
+CONFIG_HW_RANDOM_INTEL=y
+CONFIG_RANDOM_TRUST_CPU=y
+
+# ── graphics ──
+#
+# DRM is on, and it has to be: anything that draws - X11, Wayland, a
+# toolkit - opens /dev/dri, not a framebuffer. Without it this machine
+# has a text console and no UI package can ever work on top of it.
+#
+# It was off for two commits because of a build failure I took the cheap
+# way out of. backlight_set_display_name() is defined inside #ifdef
+# CONFIG_OF in drivers/video/backlight/backlight.c but declared in the
+# header under CONFIG_BACKLIGHT_CLASS_DEVICE alone, so on a machine with
+# no device tree - every PC - DRM's panel bridge calls a function nobody
+# compiled, and vmlinux fails to link naming neither option. Turning DRM
+# off made the error go away and took the graphics with it.
+#
+# The fix is one line. CONFIG_OF is selectable on x86 for this kind of
+# reason, it costs a few kilobytes that never run where no device tree
+# is passed, and the symbol exists again.
+CONFIG_OF=y
+CONFIG_DRM=y
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_DRM_FBDEV_EMULATION=y
+
+# simpledrm is the one that matters most: it drives the EFI framebuffer
+# on hardware we have no specific driver for, which is the case that
+# must not be a black screen. Then the VM drivers, then Intel, which is
+# most real laptops.
+#
+# amdgpu is deliberately absent: it is larger than this whole kernel and
+# needs firmware blobs that are not here, so it would add megabytes to
+# every download for a card that still would not light up. nouveau is
+# in, further down, for a different reason than drawing - see the XPS
+# section.
+CONFIG_SYSFB_SIMPLEFB=y
+CONFIG_DRM_SIMPLEDRM=y
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_DRM_BOCHS=y
+CONFIG_DRM_VMWGFX=y
+CONFIG_DRM_QXL=y
+CONFIG_DRM_I915=y
+
+CONFIG_FB=y
+CONFIG_FB_CORE=y
+CONFIG_FB_EFI=y
+CONFIG_FB_VESA=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+
+# ── what a UI needs besides pixels ──
+#
+# X11 has used SysV shared memory for local clients since the 1980s and
+# still does; without it every image goes over the socket instead, if it
+# starts at all. Wayland compositors want a real tmpfs for their buffers.
+CONFIG_SYSVIPC=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_SHMEM=y
+#
+# Flatpak (the Software app's Flathub applications) runs every program
+# in a bubblewrap sandbox, and Debian's bubblewrap is not setuid: it
+# builds the sandbox in an unprivileged user namespace. The document
+# portal - how a sandboxed program gets the one file somebody picked in
+# the file chooser - is a FUSE filesystem. The Pi's config turns FUSE
+# off to save space; a desktop cannot do without either.
+CONFIG_USER_NS=y
+CONFIG_FUSE_FS=y
+
+# ── input ──
+# A keyboard and a pointer from all three places they arrive: the PS/2
+# controller a VM emulates, USB, and the absolute pointer QEMU and
+# VMware use so the mouse is not trapped inside the window.
+CONFIG_INPUT=y
+CONFIG_INPUT_KEYBOARD=y
+CONFIG_KEYBOARD_ATKBD=y
+CONFIG_SERIO=y
+CONFIG_SERIO_I8042=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_MOUSEDEV=y
+CONFIG_INPUT_MOUSE=y
+CONFIG_MOUSE_PS2=y
+CONFIG_INPUT_MISC=y
+CONFIG_INPUT_UINPUT=y
+CONFIG_HID=y
+CONFIG_HID_GENERIC=y
+CONFIG_HID_MULTITOUCH=y
+CONFIG_USB_HID=y
+CONFIG_HIDRAW=y
+CONFIG_UHID=y
+
+# ── sound ──
+# A desktop with no audio device is a bug report waiting to happen. HDA
+# covers real machines and QEMU's intel-hda; virtio-snd covers the rest.
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_PCM=y
+CONFIG_SND_HDA_INTEL=y
+CONFIG_SND_HDA_GENERIC=y
+CONFIG_SND_HDA_CODEC_HDMI=y
+CONFIG_SND_VIRTIO=y
+CONFIG_SND_USB_AUDIO=y
+
+# ═══════════════════════════════════════════════════════════════════
+# The machine this is for: Dell XPS 15 9550
+#
+# i7-6700HQ (Skylake), HD 530 + GTX 960M (Optimus, no mux), 3840x2160
+# touch panel, NVMe, QCA6174 or BCM4350 WiFi, ALC3266, I2C-HID touchpad,
+# Thunderbolt 3, Realtek SD reader. Everything below is built in: this
+# kernel has no modules (CONFIG_MODULES=n comes from the Pi config) and
+# the image ships neither /lib/modules nor a module loader, so a driver
+# that is =m here is a driver that does not exist.
+#
+# Built in has one consequence that matters more than any single option:
+# every driver below probes before the root filesystem is mounted, so a
+# driver that asks for firmware at probe time asks the initramfs, not
+# the disk. kernel/build.sh puts the firmware tools/fetch-pc-fw.sh
+# fetched into the disk kernel's initramfs for exactly that reason - see
+# the comment there.
+# ═══════════════════════════════════════════════════════════════════
+
+# ── display ──
+# i915 drives the panel. Its DMC firmware (i915/skl_dmc_ver1_27.bin) is
+# what lets the display engine reach DC5/DC6; when it fails to load,
+# i915 says "Disabling runtime power management" and holds the display
+# power well on for as long as the machine is up. GuC and HuC are not
+# requested on Skylake by default (enable_guc is 0 before Gen12); their
+# blobs sit beside the DMC one anyway, so that i915.enable_guc=2 - HuC,
+# which only VA-API encoding uses, and a parameter i915 marks unsafe and
+# taints the kernel for - finds them at probe time instead of failing
+# (tools/fetch-pc-fw.sh). PSR and FBC are runtime defaults on
+# Gen9 (enable_psr=-1, enable_fbc=-1), not config options; the panel
+# backlight is i915's own intel_backlight, picked over acpi_video0 by
+# the kernel's native-backlight rule for Windows 8 era firmware.
+CONFIG_DRM_I915=y
+CONFIG_ACPI_VIDEO=y
+
+# nouveau is here to switch the GTX 960M OFF, not to draw with it.
+#
+# The panel is wired to the Intel GPU; the NVIDIA one has no outputs. A
+# PCI device with no driver bound stays in D0 and the laptop pays for it
+# in watts all day. nouveau, with runtime PM (nouveau.runpm=-1 means "on
+# for Optimus laptops", which is this one), lets the GPU autosuspend
+# after five seconds unused; the PCIe root port above it then drops into
+# D3cold through the _PR3 power resources in the firmware, which is how
+# a Skylake Optimus laptop actually cuts the power. nouveau_acpi.c sees
+# _PR3 and skips the older Optimus _DSM power-off, and nouveau already
+# carries the quirk for this exact root port (8086:1901) that avoids the
+# lockup on resume. GM107 needs no signed firmware, so there is no blob.
+#
+# VGA_SWITCHEROO is how nouveau learns it is the discrete half of an
+# Optimus pair (nouveau_is_optimus), and so whether runtime PM is on.
+CONFIG_DRM_NOUVEAU=y
+CONFIG_VGA_SWITCHEROO=y
+CONFIG_PCIEPORTBUS=y
+
+# The boot console on a 3840x2160 15.6" panel. The 8x16 font is a
+# quarter of a millimetre per pixel row there, which nobody can read;
+# fbcon=font:TER16x32 on the disk image's command line picks this one.
+# 8x16 stays for small screens and virtual machines.
+CONFIG_FONTS=y
+CONFIG_FONT_8x16=y
+CONFIG_FONT_TER16x32=y
+
+# ── booting without a flicker ──
+# From power button to desktop the screen should change twice: the
+# firmware's logo, then the desktop. Every other change - black, a
+# console, a mode set - reads as a stutter before anything has moved.
+#
+# The picture is handed along rather than redrawn. simpledrm (above)
+# takes over the framebuffer the firmware left lit and does not clear
+# it. i915 then removes simpledrm and reads back the mode the GOP set
+# up - on 6.12 that "fastboot" is how every platform works, and the
+# i915.fastboot parameter no longer exists - so when the panel is
+# already at its native mode it is taken over without a mode set, and
+# the first flip is the compositor's. The DMC firmware it asks for on
+# the way is in this kernel's initramfs (kernel/build.sh), so that
+# request is answered from memory instead of failing.
+#
+# What remains is fbcon, which would clear the screen and draw a text
+# console the moment the first framebuffer appears. Deferred takeover
+# keeps the dummy console until something is actually written to the
+# screen; with quiet loglevel=3 on the command line the kernel writes
+# nothing there below a critical message, so a panic still takes the
+# screen over and is readable, and so does a rescue shell on tty1. The penguin logo would be drawn by exactly that takeover,
+# so it stays off: the logo the owner sees is the firmware's, then ours
+# from the desktop.
+CONFIG_DUMMY_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER=y
+CONFIG_LOGO=n
+
+# ── touch screen and touchpad ──
+# Both are HID devices behind the chipset's LPSS I2C controllers (the
+# touch screen may instead be on USB, which HID_MULTITOUCH covers too).
+#
+# PINCTRL_SUNRISEPOINT is the one that is easy to miss and fatal to
+# miss: the I2C-HID interrupt lines are GPIOs on the Sunrisepoint PCH,
+# described in ACPI as GpioInt. Without the pin controller there is no
+# GPIO chip for GPIO_ACPI to resolve them against, i2c-hid gets no IRQ,
+# and touch and touchpad are both dead with nothing in the log that says
+# why. GPIO_ACPI has no prompt - it follows GPIOLIB - but it is listed so
+# the build's own check shows it.
+CONFIG_PINCTRL=y
+CONFIG_GPIOLIB=y
+CONFIG_GPIO_ACPI=y
+CONFIG_PINCTRL_SUNRISEPOINT=y
+CONFIG_MFD_INTEL_LPSS_PCI=y
+CONFIG_MFD_INTEL_LPSS_ACPI=y
+CONFIG_I2C_DESIGNWARE_CORE=y
+CONFIG_I2C_DESIGNWARE_PLATFORM=y
+CONFIG_I2C_DESIGNWARE_PCI=y
+CONFIG_I2C_HID=y
+CONFIG_I2C_HID_ACPI=y
+CONFIG_HID_MULTITOUCH=y
+CONFIG_HID_GENERIC=y
+CONFIG_USB_HID=y
+CONFIG_HID_WACOM=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_UINPUT=y
+
+# ── storage ──
+# NVMe and ext4 are what reach the root, so they are built in by the
+# fragment's first half already. The SD slot is a Realtek RTS525A on
+# PCIe; UAS is what a USB 3 SSD enclosure speaks.
+CONFIG_BLK_DEV_NVME=y
+CONFIG_NVME_HWMON=y
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_EXFAT_FS=y
+CONFIG_EFI_PARTITION=y
+CONFIG_MISC_RTSX_PCI=y
+CONFIG_MMC_REALTEK_PCI=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
+
+# ── audio ──
+# ALC3266 is Dell's name for an ALC298; the Realtek codec driver carries
+# the XPS fixups. HDMI audio goes through i915 (SND_HDA_I915, selected by
+# DRM_I915). Power save 1 lets the codec sleep after a second of silence.
+CONFIG_SND_HDA_INTEL=y
+CONFIG_SND_HDA_CODEC_REALTEK=y
+CONFIG_SND_HDA_CODEC_HDMI=y
+CONFIG_SND_HDA_POWER_SAVE_DEFAULT=1
+
+# ── WiFi and Bluetooth ──
+# Two cards were sold in this machine: Killer 1535 (QCA6174, ath10k) and
+# Dell DW1830 (BCM4350, brcmfmac over PCIe). Both are here. Their
+# firmware - and the regulatory database, which built-in cfg80211 asks
+# for once at boot and then never again - comes from fetch-pc-fw.sh.
+#
+# Bluetooth rides on USB for both cards. btusb loads the QCA rampatch
+# itself (qca/rampatch_usb_00000302.bin); BT_QCA is the UART-attached
+# QCA driver's helper and has no part in that. BT_BCM is the Broadcom
+# patchram helper; linux-firmware carries no patch for the BCM4350's
+# Bluetooth half, which then runs on its ROM firmware.
+CONFIG_WLAN_VENDOR_ATH=y
+CONFIG_ATH10K=y
+CONFIG_ATH10K_PCI=y
+CONFIG_WLAN_VENDOR_BROADCOM=y
+CONFIG_BRCMUTIL=y
+CONFIG_BRCMFMAC=y
+CONFIG_BRCMFMAC_PCIE=y
+CONFIG_BRCMFMAC_SDIO=n
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_RFCOMM=y
+CONFIG_BT_HIDP=y
+CONFIG_BT_HCIBTUSB=y
+CONFIG_BT_HCIBTUSB_AUTOSUSPEND=y
+CONFIG_BT_HCIBTUSB_BCM=y
+CONFIG_BT_BCM=y
+CONFIG_BT_DEBUGFS=n
+CONFIG_RFKILL=y
+
+# ── the laptop around it ──
+# Battery, charger, lid, power button, thermal zones; Dell's platform
+# drivers for the hotkeys, the keyboard backlight (dell::kbd_backlight,
+# a LEDS_CLASS device) and the fan and temperature sensors of the SMM
+# interface; intel-hid for the power button while in s2idle; dell-rbtn
+# for the airplane-mode key.
+CONFIG_ACPI_BATTERY=y
+CONFIG_ACPI_AC=y
+CONFIG_ACPI_BUTTON=y
+CONFIG_ACPI_THERMAL=y
+CONFIG_ACPI_FAN=y
+CONFIG_ACPI_WMI=y
+CONFIG_X86_PLATFORM_DEVICES=y
+CONFIG_X86_PLATFORM_DRIVERS_DELL=y
+CONFIG_DCDBAS=y
+CONFIG_DELL_SMBIOS=y
+CONFIG_DELL_SMBIOS_WMI=y
+CONFIG_DELL_SMBIOS_SMM=y
+CONFIG_DELL_LAPTOP=y
+CONFIG_DELL_WMI=y
+CONFIG_DELL_RBTN=y
+CONFIG_INTEL_HID_EVENT=y
+CONFIG_INTEL_VBTN=y
+# Dell's other platform drivers default to m, and with no modules "m"
+# becomes "y". These are for other Dells (all-in-ones, Alienware,
+# Latitude LEDs, 2020s battery and thermal-profile interfaces, the HDD
+# free-fall sensor) or are BIOS-update and BIOS-settings interfaces this
+# image has no tool for; DELL_RBU also drags in the firmware loader's
+# user-helper fallback, which nothing else here wants.
+CONFIG_DELL_RBU=n
+CONFIG_DELL_WMI_SYSMAN=n
+CONFIG_DELL_WMI_AIO=n
+CONFIG_DELL_WMI_DDV=n
+CONFIG_DELL_WMI_LED=n
+CONFIG_DELL_PC=n
+CONFIG_DELL_SMO8800=n
+CONFIG_ALIENWARE_WMI=n
+CONFIG_FW_LOADER_USER_HELPER=n
+CONFIG_HWMON=y
+CONFIG_SENSORS_DELL_SMM=y
+CONFIG_SENSORS_CORETEMP=y
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_NEW_LEDS=y
+CONFIG_LEDS_CLASS=y
+
+# Power: the PMC driver (SLP_S0 residency, what tells s2idle from real
+# sleep), intel_pstate with HWP, intel_idle for the C-states the ACPI
+# tables do not describe, RAPL for package power readings, and the
+# package temperature sensor.
+CONFIG_INTEL_VSEC=y
+CONFIG_INTEL_PMT_TELEMETRY=y
+CONFIG_INTEL_PMC_CORE=y
+CONFIG_X86_INTEL_PSTATE=y
+CONFIG_CPU_IDLE=y
+CONFIG_INTEL_IDLE=y
+CONFIG_POWERCAP=y
+CONFIG_INTEL_RAPL=y
+CONFIG_THERMAL=y
+CONFIG_X86_PKG_TEMP_THERMAL=y
+# What thermald works through: the ACPI DPTF participants (INT3400,
+# INT3403), idle injection when the package runs hot, and the PCH's own
+# sensor.
+CONFIG_INT340X_THERMAL=y
+CONFIG_ACPI_THERMAL_REL=y
+CONFIG_INTEL_POWERCLAMP=y
+CONFIG_INTEL_PCH_THERMAL=y
+
+# Suspend. SUSPEND gives both s2idle and deep (S3) in /sys/power/
+# mem_sleep. The command line asks for deep (tools/mkdisk.sh): the XPS
+# 9550 sleeps and wakes properly in S3 (Ubuntu uses it there), and its
+# s2idle keeps drawing power. A machine without S3 keeps s2idle.
+# Hibernation stays off - there is no swap partition to write to.
+CONFIG_SUSPEND=y
+CONFIG_PM_SLEEP=y
+
+# Thunderbolt 3 (Alpine Ridge) and USB-C. PCIe hotplug is how a
+# Thunderbolt device's PCIe tunnel appears; the WMI switch forces the
+# controller's power on, which the firmware otherwise cuts when nothing
+# is plugged in.
+CONFIG_USB4=y
+CONFIG_HOTPLUG_PCI=y
+CONFIG_HOTPLUG_PCI_PCIE=y
+CONFIG_HOTPLUG_PCI_ACPI=y
+CONFIG_INTEL_WMI_THUNDERBOLT=y
+CONFIG_TYPEC=y
+CONFIG_TYPEC_UCSI=y
+CONFIG_UCSI_ACPI=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PCI=y
+
+# The webcam is a USB Video Class device. The media filter keeps the
+# rest of drivers/media - TV tuners, radio, remote controls - out.
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_SUPPORT_FILTER=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_USB_SUPPORT=y
+CONFIG_USB_VIDEO_CLASS=y
+CONFIG_USB_GSPCA=n
+CONFIG_RC_CORE=n
+
+# UEFI: the kernel is its own EFI application, and efivarfs is how
+# userspace reads and sets boot entries (and how preinit reads which
+# entry the firmware started).
+#
+# The boot menu on the ESP (\EFI\LP\lpboot.efi) starts this kernel the
+# way the UEFI shell does: LoadImage + StartImage on \EFI\LP\vmlinuz.efi,
+# with load options such as "initrd=\EFI\LP\initrd.img root=... ". The
+# stub takes the initrd two ways and 6.12 has no switch for either:
+# through the LoadFile2 protocol on the LINUX_EFI_INITRD_MEDIA_GUID
+# device path, which it tries first (OVMF's -kernel/-initrd path and
+# systemd-boot use it), and from initrd= in the load options, which it
+# reads straight off the ESP when nothing answers LoadFile2. An initrd
+# loaded either way is unpacked AFTER the initramfs built into the
+# kernel, over it: a /init in it replaces preinit. The command line is
+# the built-in one with the load options appended (CMDLINE_OVERRIDE
+# stays off, or a recovery entry could not say root= and lp.mode=), and
+# where a word appears twice the later one wins - for the kernel's
+# root= and for preinit's. The handover protocol is the older entry
+# point some loaders (GRUB's linuxefi) still jump to; it costs nothing
+# and keeps a GRUB chainload possible.
+CONFIG_EFI_STUB=y
+CONFIG_EFI_HANDOVER_PROTOCOL=y
+CONFIG_EFIVAR_FS=y
+CONFIG_CMDLINE_OVERRIDE=n
+
+# ── other people's disks ──
+# USB sticks and SD cards come formatted FAT32 or exFAT; a disk from a
+# Windows machine is NTFS, and ntfs3 writes to it as well as reading
+# (the Windows side must be shut down fully - "fast startup" leaves the
+# volume dirty and ntfs3 then mounts it read-only). Btrfs is for a disk
+# from another Linux. All built in: there are no modules to load them
+# from (see the top of this section), and a filesystem that is not
+# there is a USB stick that "does not work".
+#
+# FAT file names: FAT_DEFAULT_UTF8 makes a vfat mount give UTF-8 names
+# with no mount option, so a Korean file name on a stick is a Korean
+# file name here. The code pages are the ones FAT needs to read short
+# names (437) and the default iocharset (iso8859-1).
+CONFIG_FAT_FS=y
+CONFIG_FAT_DEFAULT_UTF8=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+CONFIG_NTFS3_FS=y
+CONFIG_NTFS3_LZX_XPRESS=y
+CONFIG_NTFS3_FS_POSIX_ACL=n
+CONFIG_BTRFS_FS=y
+CONFIG_BTRFS_FS_POSIX_ACL=y
+# Btrfs selects the RAID6 library, which by default times its
+# algorithms at boot with preemption off - 16 jiffies for each of the
+# three AVX2 variants and 16 more for the xor pass, about 70ms of every
+# boot spent choosing between variants for a RAID6 array this laptop
+# will never have. Off, it takes the first one the CPU supports (the
+# list is in order of preference) without timing anything.
+CONFIG_RAID6_PQ_BENCHMARK=n
+
+# Encrypted disks (LUKS2). cryptsetup does the key derivation (argon2)
+# in userspace and hands dm-crypt the key; the kernel's part is the
+# device mapper, dm-crypt, and the cipher: aes-xts-plain64, the LUKS2
+# default, with AES-NI. The user-space crypto sockets are what
+# cryptsetup uses to open the keyslot area without a temporary device
+# mapping, and what `cryptsetup benchmark` measures. MD is only the
+# menu the device mapper lives in (the Pi config switched the whole
+# menu off); software RAID stays off.
+CONFIG_MD=y
+CONFIG_BLK_DEV_MD=n
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_CRYPT=y
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_AES_NI_INTEL=y
+CONFIG_CRYPTO_SHA256_SSSE3=y
+CONFIG_CRYPTO_USER_API_HASH=y
+CONFIG_CRYPTO_USER_API_SKCIPHER=y
+
+# ── the same kernel under QEMU ──
+# One kernel for the laptop and for the virtual machine it is tested in,
+# so that what was tested is what ships. virtio-multitouch-pci is a
+# virtio-input device with real ABS_MT axes, which is how touch is
+# exercised without the panel.
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_VIRTIO_INPUT=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_BLK=y
+
+# ── performance ──
+# The desktop animates on springs at 60 frames a second: 16.7ms per
+# frame, in which the compositor and the client each have to be woken,
+# run and finish. A frame is late - and the motion visibly hitches -
+# when either one is ready but waiting for the CPU, and on a laptop
+# that is building something or unpacking a package in the background
+# that wait is the whole difference between smooth and not.
+#
+# Full preemption: how soon a woken task runs is then bounded by the
+# scheduler rather than by the longest kernel path the CPU happens to
+# be in. PREEMPT_DYNAMIC with PREEMPT as the build choice boots in
+# "full" mode (dmesg: "Dynamic Preempt: full") and keeps
+# preempt=voluntary one boot option away if a workload ever prefers
+# throughput.
+CONFIG_PREEMPT=y
+CONFIG_PREEMPT_DYNAMIC=y
+
+# HZ=1000. With NO_HZ_IDLE an idle CPU takes no ticks at all, so HZ costs
+# nothing when the laptop is doing nothing - an idle desktop whose
+# animations have all come to rest wakes no CPU for them; on a busy CPU
+# it is the granularity of time slices, jiffy timeouts and timer-driven
+# wakeups, and 1ms rather than 4ms is audible in audio and visible in
+# input and in frame pacing. The tick itself is well under 1% of a
+# Skylake core. None of this touches the power side: intel_pstate still
+# runs the cores with HWP and the energy preference lp-tune sets.
+CONFIG_HZ_1000=y
+CONFIG_NO_HZ_IDLE=y
+
+# Block schedulers: NVMe runs with none (its queues are the scheduler);
+# mq-deadline is the default for single-queue devices; BFQ is there for
+# the SD card and USB sticks, where one big copy otherwise starves every
+# other reader.
+CONFIG_MQ_IOSCHED_DEADLINE=y
+CONFIG_IOSCHED_BFQ=y
+
+# Compressed memory. zram is the swap device (zstd: about a third more
+# per page than lzo-rle, at a speed a Skylake core does not notice).
+# zswap is built but off by default - in front of zram it would compress
+# every page twice; it is for a machine that swaps to a file instead.
+CONFIG_ZRAM=y
+CONFIG_ZSMALLOC=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_BACKEND_LZ4=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
+CONFIG_ZRAM_DEF_COMP_LZORLE=n
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_DEFAULT_ON=n
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
+CONFIG_CRYPTO_ZSTD=y
+
+# Transparent huge pages only where a program asks (madvise): the win
+# for browsers and JITs without the latency spikes of always-on
+# compaction.
+CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
+
+# schedutil is the default governor wherever the kernel's governors are
+# used - acpi-cpufreq, intel_pstate in passive mode, virtual machines.
+# On the XPS intel_pstate runs in active mode with HWP, where the CPU
+# picks its own frequency and the "governor" is only powersave or
+# performance plus an energy preference; that is lp-tune's to set.
+CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=n
+
+# Autogroup puts each session in its own scheduling group, so a make -j8
+# in a terminal does not take the desktop's share - the compositor keeps
+# getting its frames out while eight compilers run. It selects CGROUPS;
+# the Pi config's "no cgroups" line is overridden here on purpose.
+CONFIG_SCHED_AUTOGROUP=y
+CONFIG_CGROUPS=y
+
+# -O2 rather than the Pi's -Os. On a board with 512MB and a slow SD card
+# every kilobyte mattered; on an i7 the size difference is a few hundred
+# kilobytes of a compressed image and the speed is every system call.
+CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+CONFIG_CC_OPTIMIZE_FOR_SIZE=n
+
+# Boot: the kernel image is compressed once, and the built-in initramfs
+# inside it is not compressed again - gzip inside gzip made the boot
+# decompress the same bytes twice.
+#
+# gzip rather than zstd, which decompresses several times faster (on
+# the order of a tenth of a second less at every boot for an image this
+# size): the kernel build runs the HOST's zstd program to compress, the
+# build machine these images are made on has none, and a kernel build
+# that stops at its very last step, after twenty minutes, is what that
+# looked like. If zstd becomes part of the build host, swap the first
+# two lines and add it to kernel/build.sh's tool checks.
+CONFIG_KERNEL_GZIP=y
+CONFIG_KERNEL_ZSTD=n
+CONFIG_INITRAMFS_COMPRESSION_NONE=y
+CONFIG_INITRAMFS_COMPRESSION_GZIP=n

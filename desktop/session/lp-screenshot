@@ -1,0 +1,118 @@
+#!/usr/bin/python3
+"""lp-screenshot - what the screenshot keys run.
+
+    lp-screenshot [full|area|window]
+
+The picture is saved to Pictures/Screenshots and put on the clipboard,
+and a notification says where it went. The keys used to copy to the
+clipboard and nothing else: no file, no word on the screen, so pressing
+Print Screen looked like it did nothing.
+
+    Print               the whole screen
+    Shift+Print         an area (drag to choose; Escape cancels)
+    Super+Shift+S       an area, as on Windows
+    Alt+Print           the window in front (sway; wayfire has no way to
+                        ask for it, so there an area is chosen instead)
+    Ctrl+Shift+Print    the Screenshot app (lp-shot)
+
+grim, slurp, wl-copy and notify-send do the work; swaymsg says where
+the window in front is.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+
+def korean():
+    for k in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        v = os.environ.get(k)
+        if v:
+            return v.startswith("ko")
+    return False
+
+
+def T(en, ko):
+    return ko if korean() else en
+
+
+def pictures_dir():
+    """XDG_PICTURES_DIR from ~/.config/user-dirs.dirs, else ~/Pictures."""
+    home = os.path.expanduser("~")
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
+                        "user-dirs.dirs")
+    try:
+        with open(conf) as f:
+            for line in f:
+                m = re.match(r'\s*XDG_PICTURES_DIR="(.*)"', line)
+                if m:
+                    return m.group(1).replace("$HOME", home)
+    except OSError:
+        pass
+    return os.path.join(home, "Pictures")
+
+
+def focused_rect(node):
+    if node.get("focused") and node.get("type") in ("con", "floating_con"):
+        r = node["rect"]
+        return "%d,%d %dx%d" % (r["x"], r["y"], r["width"], r["height"])
+    for child in node.get("nodes", []) + node.get("floating_nodes", []):
+        g = focused_rect(child)
+        if g:
+            return g
+    return None
+
+
+def window_geometry():
+    try:
+        tree = subprocess.run(["swaymsg", "-t", "get_tree", "-r"], capture_output=True,
+                              text=True, timeout=5).stdout
+        return focused_rect(json.loads(tree))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def choose_area():
+    try:
+        p = subprocess.run(["slurp"], capture_output=True, text=True)
+    except OSError:
+        return None
+    g = p.stdout.strip()
+    return g if p.returncode == 0 and g else None
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "full"
+    geometry = None
+    if mode == "window":
+        geometry = window_geometry() or choose_area()
+        if geometry is None:
+            return 0
+    elif mode == "area":
+        geometry = choose_area()
+        if geometry is None:
+            return 0                    # Escape: nothing taken, nothing said
+
+    folder = os.path.join(pictures_dir(), "Screenshots")
+    os.makedirs(folder, exist_ok=True)
+    name = time.strftime(T("Screenshot %Y-%m-%d %H-%M-%S.png", "스크린샷 %Y-%m-%d %H-%M-%S.png"))
+    path = os.path.join(folder, name)
+
+    cmd = ["grim"] + (["-g", geometry] if geometry else []) + [path]
+    if subprocess.run(cmd).returncode != 0 or not os.path.exists(path):
+        subprocess.run(["notify-send", "-a", "LP", T("Screenshot failed", "스크린샷을 찍지 못했습니다")])
+        return 1
+    try:
+        with open(path, "rb") as f:
+            subprocess.run(["wl-copy", "--type", "image/png"], stdin=f, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    subprocess.run(["notify-send", "-a", "LP", "-i", path, T("Screenshot saved", "스크린샷을 저장했습니다"),
+                    T("%s\nAlso copied to the clipboard.", "%s\n클립보드에도 복사했습니다.") % path])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

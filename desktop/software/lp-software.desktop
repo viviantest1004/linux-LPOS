@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Software
+Name[ko]=소프트웨어
+GenericName=Software Center
+GenericName[ko]=소프트웨어 센터
+Comment=Install, remove and update applications
+Comment[ko]=앱을 설치하고 제거하고 업데이트합니다
+Exec=lp-software
+Icon=system-software-install
+Terminal=false
+Categories=System;PackageManager;GTK;
+Keywords=software;store;install;remove;update;apt;package;
+Keywords[ko]=소프트웨어;스토어;설치;제거;업데이트;패키지;
+StartupNotify=true
+# The window's app_id is org.lpzero.Software; this file is lp-software.
+# StartupWMClass is what joins the two for the dock.
+StartupWMClass=org.lpzero.Software

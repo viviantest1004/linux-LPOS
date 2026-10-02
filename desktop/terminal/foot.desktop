@@ -1,0 +1,21 @@
+[Desktop Entry]
+# foot's own entry, renamed: the top bar and the app grid show an app by
+# its Name, and "Foot" says nothing to somebody who opened "Terminal".
+# Installed to /usr/local/share/applications, which comes before
+# /usr/share in XDG_DATA_DIRS, so this one wins under the same id.
+Type=Application
+Name=Terminal
+Name[ko]=터미널
+GenericName=Terminal
+GenericName[ko]=터미널
+Comment=Use the command line
+Comment[ko]=명령줄을 씁니다
+Exec=foot
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;
+StartupWMClass=foot
+# Console is the terminal now (org.gnome.Console.desktop, beside this);
+# foot stays installed for whoever runs it by name.
+NoDisplay=true

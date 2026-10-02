@@ -1,0 +1,382 @@
+#!/usr/bin/python3
+"""lp-display-icc - an ICC profile of the built-in panel, made from its EDID.
+
+The XPS 15's 3840x2160 panel is wide-gamut: its red and green primaries lie
+well outside sRGB's. Almost everything on the web and on disk is sRGB, and
+sent to such a panel unconverted it comes out oversaturated - skin turns
+orange-red, greens go neon. Correcting that needs a description of the
+panel, and a real one needs a colorimeter. What every panel does carry is
+its EDID, which states the chromaticities of its three primaries and its
+white point, and its gamma; that is enough for a matrix/TRC display
+profile, which is exactly what colord and GNOME make automatically when
+there is no calibrated profile. It fixes the gamut (the part that is
+visibly wrong) and approximates the tone curve.
+
+Nothing is downloaded or copied: the profile is computed on the machine
+from data the panel itself reports, so there is no licence question.
+
+Usage:
+  lp-display-icc            make sure the profile exists and print its path
+                            (exit 1, with the reason on stderr, if there is no
+                            built-in panel or its EDID is unusable)
+  lp-display-icc --info     print what the EDID says and how the gamut
+                            compares with sRGB, Display P3 and Adobe RGB
+  lp-display-icc --edid FILE [--out FILE]
+                            use an EDID file instead of the panel's (for
+                            testing, or another monitor)
+
+The profile goes to $XDG_DATA_HOME/icc/lp-panel.icc (the directory colord
+and GIMP look in), next to lp-panel.v1.edid, a copy of the EDID it was
+made from: the session calls this at every login and it only rebuilds when
+the panel's EDID changes, so the usual cost is one file comparison. Beside
+them goes lp-mpv.conf, two lines that /etc/mpv/mpv.conf includes so video
+is converted to the panel too (mpv cannot read an environment variable in
+its config, and skips a missing include silently).
+
+The ICC file itself is written by Little CMS (liblcms2, already in the base
+for GTK and the image libraries) through ctypes rather than assembled by
+hand here: lcms does the Bradford adaptation to D50 and the tag encoding
+that every colour-managed program then reads back with the same library.
+It is written as ICC version 2.1 on purpose - Firefox's colour engine
+(qcms) rejects version 4 display profiles unless
+gfx.color_management.enablev4 is set, and every other reader takes v2.
+
+Written atomically and durably (temporary file, fsync, rename, fsync of
+the directory), so a power cut leaves either the old profile or the new
+one, never half of one.
+"""
+
+import ctypes
+import glob
+import os
+import sys
+
+VERSION_TAG = "v1"          # bump when the profile recipe changes
+
+# Reference gamuts for --info, CIE 1931 xy.
+REFERENCE = {
+    "sRGB":       ((0.640, 0.330), (0.300, 0.600), (0.150, 0.060)),
+    "Display P3": ((0.680, 0.320), (0.265, 0.690), (0.150, 0.060)),
+    "Adobe RGB":  ((0.640, 0.330), (0.210, 0.710), (0.150, 0.060)),
+}
+
+
+def die(msg):
+    sys.stderr.write("lp-display-icc: %s\n" % msg)
+    sys.exit(1)
+
+
+def panel_edid():
+    """The built-in panel's EDID: eDP first (the XPS), then LVDS and DSI."""
+    for kind in ("eDP", "LVDS", "DSI"):
+        for path in sorted(glob.glob("/sys/class/drm/card*-%s-*/edid" % kind)):
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if len(data) >= 128:
+                return path, data
+    return None, None
+
+
+def parse_edid(d):
+    if len(d) < 128 or d[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
+        raise ValueError("not an EDID (bad header)")
+    if sum(d[:128]) % 256:
+        raise ValueError("EDID checksum is wrong")
+    lo1, lo2 = d[25], d[26]
+
+    def c(hi, lo):
+        return ((hi << 2) | lo) / 1024.0
+
+    red = (c(d[27], (lo1 >> 6) & 3), c(d[28], (lo1 >> 4) & 3))
+    green = (c(d[29], (lo1 >> 2) & 3), c(d[30], lo1 & 3))
+    blue = (c(d[31], (lo2 >> 6) & 3), c(d[32], (lo2 >> 4) & 3))
+    white = (c(d[33], (lo2 >> 2) & 3), c(d[34], lo2 & 3))
+    # Byte 23 is (gamma * 100) - 100. 0xFF means "stated elsewhere", which
+    # for a laptop panel means nowhere; 2.2 is what sRGB-era panels target.
+    gamma = 2.2 if d[23] == 0xFF else (d[23] + 100) / 100.0
+    v = (d[8] << 8) | d[9]
+    maker = "".join(chr(((v >> s) & 31) + 64) for s in (10, 5, 0))
+    product = d[10] | (d[11] << 8)
+    name, texts = None, []
+    for off in (54, 72, 90, 108):
+        blk = d[off:off + 18]
+        if blk[0] == 0 and blk[1] == 0 and blk[3] in (0xFC, 0xFE):
+            s = blk[5:18].split(b"\n")[0].decode("ascii", "replace").strip()
+            if blk[3] == 0xFC:
+                name = s
+            elif s:
+                texts.append(s)
+    model = name or " ".join(texts) or "%s %04X" % (maker, product)
+    return {"red": red, "green": green, "blue": blue, "white": white,
+            "gamma": gamma, "maker": maker, "product": product,
+            "model": model}
+
+
+def area(poly):
+    s = 0.0
+    for i in range(len(poly)):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % len(poly)]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
+def check(e):
+    """Refuse EDIDs whose colour block is empty or nonsense: some panels
+    ship zeros or a copy-pasted placeholder, and a profile made from that
+    would make colours worse, not better."""
+    pts = [e["red"], e["green"], e["blue"], e["white"]]
+    for x, y in pts:
+        if not (0.0 < x < 0.9 and 0.01 < y < 0.9):
+            raise ValueError("chromaticity out of range: %.4f,%.4f" % (x, y))
+    tri = [e["red"], e["green"], e["blue"]]
+    if area(tri) < 0.05:
+        raise ValueError("primaries enclose almost no area")
+    wx, wy = e["white"]
+    if not (0.25 < wx < 0.40 and 0.25 < wy < 0.45):
+        raise ValueError("white point %.4f,%.4f is not a white" % (wx, wy))
+    if not 1.0 <= e["gamma"] <= 3.0:
+        raise ValueError("gamma %.2f is not plausible" % e["gamma"])
+
+
+def to_uv(p):
+    """CIE 1931 xy to 1976 u'v', where equal distances look more nearly
+    equal, so gamut areas compare fairly."""
+    x, y = p
+    den = -2.0 * x + 12.0 * y + 3.0
+    return (4.0 * x / den, 9.0 * y / den)
+
+
+def clip(subject, clipper):
+    """Sutherland-Hodgman: the part of convex polygon subject inside
+    convex polygon clipper (both counter-clockwise)."""
+    def inside(p, a, b):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= 0
+
+    def cross(p1, p2, a, b):
+        dc = (a[0] - b[0], a[1] - b[1])
+        dp = (p1[0] - p2[0], p1[1] - p2[1])
+        n1 = a[0] * b[1] - a[1] * b[0]
+        n2 = p1[0] * p2[1] - p1[1] * p2[0]
+        n3 = dc[0] * dp[1] - dc[1] * dp[0]
+        return ((n1 * dp[0] - n2 * dc[0]) / n3, (n1 * dp[1] - n2 * dc[1]) / n3)
+
+    out = list(subject)
+    for i in range(len(clipper)):
+        a, b = clipper[i], clipper[(i + 1) % len(clipper)]
+        inp, out = out, []
+        if not inp:
+            break
+        s = inp[-1]
+        for p in inp:
+            if inside(p, a, b):
+                if not inside(s, a, b):
+                    out.append(cross(s, p, a, b))
+                out.append(p)
+            elif inside(s, a, b):
+                out.append(cross(s, p, a, b))
+            s = p
+    return out
+
+
+def ccw(poly):
+    s = sum(poly[i][0] * poly[(i + 1) % 3][1] - poly[(i + 1) % 3][0] * poly[i][1]
+            for i in range(3))
+    return poly if s > 0 else poly[::-1]
+
+
+def info(e, source):
+    print("source:     %s" % source)
+    print("panel:      %s (maker %s, product %04X)" % (e["model"], e["maker"], e["product"]))
+    for k in ("red", "green", "blue", "white"):
+        print("%-11s x=%.4f y=%.4f" % (k + ":", e[k][0], e[k][1]))
+    print("gamma:      %.2f" % e["gamma"])
+    panel = ccw([to_uv(e[k]) for k in ("red", "green", "blue")])
+    pa = area(panel)
+    if pa < 1e-6:
+        return
+    for name, prim in REFERENCE.items():
+        ref = ccw([to_uv(p) for p in prim])
+        cover = area(clip(ref, panel)) / area(ref) * 100.0
+        print("%-11s panel area %5.1f%% of it, covers %5.1f%% of it (CIE 1976 u'v')"
+              % (name + ":", pa / area(ref) * 100.0, cover))
+
+
+# ── Little CMS through ctypes ──────────────────────────────────────
+
+class CIExyY(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double), ("Y", ctypes.c_double)]
+
+
+class CIExyYTRIPLE(ctypes.Structure):
+    _fields_ = [("Red", CIExyY), ("Green", CIExyY), ("Blue", CIExyY)]
+
+
+def sig(s):
+    return int.from_bytes(s.encode("ascii"), "big")
+
+
+def make_profile(e):
+    try:
+        lcms = ctypes.CDLL("liblcms2.so.2")
+    except OSError:
+        raise RuntimeError("liblcms2.so.2 is not installed (package liblcms2-2)")
+    vp, dbl, u32 = ctypes.c_void_p, ctypes.c_double, ctypes.c_uint32
+    lcms.cmsBuildGamma.restype = vp
+    lcms.cmsBuildGamma.argtypes = [vp, dbl]
+    lcms.cmsCreateRGBProfile.restype = vp
+    lcms.cmsCreateRGBProfile.argtypes = [ctypes.POINTER(CIExyY),
+                                         ctypes.POINTER(CIExyYTRIPLE),
+                                         ctypes.POINTER(vp * 3)]
+    lcms.cmsSetProfileVersion.argtypes = [vp, dbl]
+    lcms.cmsMLUalloc.restype = vp
+    lcms.cmsMLUalloc.argtypes = [vp, u32]
+    lcms.cmsMLUsetASCII.argtypes = [vp, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+    lcms.cmsWriteTag.argtypes = [vp, u32, vp]
+    lcms.cmsSaveProfileToMem.argtypes = [vp, vp, ctypes.POINTER(u32)]
+    lcms.cmsCloseProfile.argtypes = [vp]
+    lcms.cmsFreeToneCurve.argtypes = [vp]
+    lcms.cmsMLUfree.argtypes = [vp]
+
+    white = CIExyY(e["white"][0], e["white"][1], 1.0)
+    prim = CIExyYTRIPLE(CIExyY(e["red"][0], e["red"][1], 1.0),
+                        CIExyY(e["green"][0], e["green"][1], 1.0),
+                        CIExyY(e["blue"][0], e["blue"][1], 1.0))
+    curve = lcms.cmsBuildGamma(None, e["gamma"])
+    curves = (vp * 3)(curve, curve, curve)
+    h = lcms.cmsCreateRGBProfile(ctypes.byref(white), ctypes.byref(prim),
+                                 ctypes.byref(curves))
+    lcms.cmsFreeToneCurve(curve)
+    if not h:
+        raise RuntimeError("Little CMS could not build a profile from these primaries")
+    lcms.cmsSetProfileVersion(h, 2.1)
+    texts = {
+        "desc": "%s (from EDID, LP)" % e["model"],
+        "cprt": "No copyright. Generated on this machine from the panel's EDID.",
+        "dmnd": e["maker"],
+        "dmdd": e["model"],
+    }
+    mlus = []
+    for tag, text in texts.items():
+        m = lcms.cmsMLUalloc(None, 1)
+        lcms.cmsMLUsetASCII(m, b"en", b"US", text.encode("ascii", "replace"))
+        lcms.cmsWriteTag(h, sig(tag), m)
+        mlus.append(m)
+    size = u32(0)
+    lcms.cmsSaveProfileToMem(h, None, ctypes.byref(size))
+    buf = ctypes.create_string_buffer(size.value)
+    ok = lcms.cmsSaveProfileToMem(h, buf, ctypes.byref(size))
+    lcms.cmsCloseProfile(h)
+    for m in mlus:
+        lcms.cmsMLUfree(m)
+    if not ok:
+        raise RuntimeError("Little CMS could not serialise the profile")
+    return buf.raw[:size.value]
+
+
+def write_durably(path, data):
+    d = os.path.dirname(path) or "."
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(tmp, path)
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def main(argv):
+    edid_file = out = None
+    want_info = False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--info":
+            want_info = True
+        elif a in ("--edid", "--out") and i + 1 < len(argv):
+            i += 1
+            if a == "--edid":
+                edid_file = argv[i]
+            else:
+                out = argv[i]
+        elif a in ("-h", "--help"):
+            print(__doc__.split("\n\n")[0])
+            print(__doc__[__doc__.index("Usage:"):__doc__.index("The profile goes")].rstrip())
+            return 0
+        else:
+            die("unknown argument %r (try --help)" % a)
+        i += 1
+
+    if edid_file:
+        source = edid_file
+        try:
+            with open(edid_file, "rb") as f:
+                data = f.read()
+        except OSError as err:
+            die("cannot read %s: %s" % (edid_file, err.strerror))
+    else:
+        source, data = panel_edid()
+        if data is None:
+            die("no built-in panel with an EDID under /sys/class/drm")
+
+    try:
+        e = parse_edid(data)
+        if want_info:
+            info(e, source)
+            sys.stdout.flush()
+        check(e)
+    except ValueError as err:
+        die("%s: %s" % (source, err))
+    if want_info:
+        return 0
+
+    if out is None:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+            os.environ.get("HOME", "/"), ".local", "share")
+        icc_dir = os.path.join(base, "icc")
+        out = os.path.join(icc_dir, "lp-panel.icc")
+        stamp = os.path.join(icc_dir, "lp-panel.%s.edid" % VERSION_TAG)
+        mpv_conf = os.path.join(icc_dir, "lp-mpv.conf")
+        try:
+            with open(stamp, "rb") as f:
+                if (f.read() == data[:128] and os.path.getsize(out) > 0
+                        and os.path.exists(mpv_conf)):
+                    print(out)
+                    return 0
+        except OSError:
+            pass
+        os.makedirs(icc_dir, exist_ok=True)
+    else:
+        stamp = mpv_conf = None
+
+    try:
+        profile = make_profile(e)
+    except RuntimeError as err:
+        die(str(err))
+    write_durably(out, profile)
+    if mpv_conf:
+        cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+            os.environ.get("HOME", "/"), ".cache")
+        write_durably(mpv_conf, (
+            "# Written by lp-display-icc and included by /etc/mpv/mpv.conf:\n"
+            "# convert video to the built-in panel's gamut.\n"
+            "icc-profile=%s\nicc-cache-dir=%s\n"
+            % (out, os.path.join(cache, "mpv-icc"))).encode())
+    if stamp:
+        # Written last: it is what says the profile beside it is complete.
+        write_durably(stamp, data[:128])
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

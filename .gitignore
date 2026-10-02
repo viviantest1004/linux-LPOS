@@ -1,0 +1,94 @@
+# 빌드 산출물
+build/
+userland/bin/
+*.o
+*.d
+*.elf
+*.map
+*.img
+!.gitkeep
+
+# 다운로드받은 클로즈드 블롭 (재현 가능하므로 커밋하지 않는다)
+blobs/
+
+# SD카드 이미지 조립 결과
+sdcard/
+
+# 에디터
+.vscode/
+.idea/
+*.swp
+qemu-out/
+userland/rootfs/
+userland/initramfs.cpio.gz
+kernel/out/
+# The Pi Zero W kernel and the rootfs it is built from. Same reason as
+# kernel/out/: build products that kernel/build.sh remakes from the
+# config beside it.
+kernel/out-armv6/
+userland/rootfs-armv6/
+userland/rootfs-amd64/
+# 배포 이미지.
+#
+# 원래는 통째로 제외했다. 지금은 이미지와 체크섬만 추적한다 -
+# 빌드 도구를 갖추지 않은 사람이 받아서 바로 구울 수 있어야 하기
+# 때문이다. 나머지 중간 산출물은 그대로 제외한다.
+# (dist/ 를 통째로 제외하면 하위 항목을 다시 포함시킬 수 없어서
+#  dist/* 로 적는다.)
+dist/*
+!dist/*.img.xz
+!dist/*.zip
+!dist/SHA256SUMS.txt
+!dist/PI_IMAGE_SHA256.txt
+# The desktop image is well over GitHub's 100MB file limit; it is handed
+# over directly, not committed.
+dist/linux-LP_desktop.img.xz
+dist/linux-LP_desktop.img.xz.sha256
+# ... and is published instead as 45MB pieces under dist/desktop/,
+# with SHA256SUMS and get.sh, which fetches and joins them.
+!dist/desktop/
+# The same for the 8GB stick's edition (tools/mkdesktop.sh, LP_EDITION=8g).
+!dist/desktop-8g/
+
+# tools/build-sdk.sh 가 만든다 (userland/libc 에서 뽑아낸 것뿐)
+sdk/
+
+# repo/ 는 무시하지 않는다.
+#
+# 예전에는 tools/mkpkg.sh 가 만드는 로컬 시험용 디렉터리였다. 지금은
+# 기기의 기본 패키지 저장소 그 자체다 - raw.githubusercontent.com 이
+# 이 디렉터리를 HTTPS 로 그대로 실어주고, userland/pkg/pkg.c 의
+# DEFAULT_REPO 가 그 주소를 가리킨다. 무시하면 커밋되지 않고, 커밋되지
+# 않으면 `pkg install` 이 다시 아무것도 못 받는다.
+
+# tools/common.sh 가 정하는 빌드 작업 디렉터리 (커널 소스, sysroot 등)
+#
+# 슬래시 없이 적는다. 디스크가 부족해서 .build 를 다른 곳으로 심볼릭
+# 링크해두면 그건 디렉터리가 아니라 링크라서 ".build/" 에 걸리지 않고,
+# 그대로 커밋되어 버린다. 실제로 /home/user/kernel-work 를 가리키는
+# 링크가 그렇게 올라갔었다 - 저장소를 받은 사람에게는 있지도 않은
+# 경로를 가리키는 깨진 링크이고, 스크립트가 만들려는 디렉터리를
+# 가로막는다. 하드코딩된 경로를 걷어낸 바로 그 커밋이 링크로 그것을
+# 다시 들여온 셈이었다.
+.build
+
+# 커널 kconfig 가 병합 중에 남기는 것들. 하나에 240KB 씩 한다.
+.tmp.config*
+.merge_tmp.config*
+keys/
+
+# The disk-rooted kernel's output. Ten megabytes of build product that
+# mkdisk.sh remakes; the config that produced it is in kernel/.
+kernel/out-amd64-disk/
+
+# The compiled file manager. Built in the Debian chroot against the same
+# GTK the image ships, by tools/mkdesktop.sh.
+desktop/files/lp-files
+
+# 오브젝트 디렉터리 (아키텍처별)
+userland/build-*/
+*.a
+
+# Python bytecode caches, written whenever a script runs.
+__pycache__/
+*.pyc

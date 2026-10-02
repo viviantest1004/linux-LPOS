@@ -1,0 +1,7 @@
+# Build products: the program, the test, and what wayland-scanner makes
+# from protocol/*.xml on every build.
+lp-osk
+hangul-test
+*.o
+*-client-protocol.h
+*-protocol.c

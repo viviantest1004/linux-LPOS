@@ -1,0 +1,87 @@
+#!/usr/bin/python3
+"""lp-rollback - undo the last update (apt), from its snapshot.
+
+    lp-rollback           say what the last update changed, and undo it
+    lp-rollback --list    only say what it changed
+    lp-rollback --yes     undo it without asking
+
+The snapshot is lp-rollback-save's (/var/lib/lp-rollback/last). Undoing
+it: the packages that update installed for the first time are removed,
+the files of every package it upgraded or removed are put back as they
+were, with dpkg's record of them, and files the new versions added that
+the old ones did not have are deleted. The result is the system as it
+was before `apt upgrade`, down to what dpkg believes is installed.
+
+Works on the running system (as root) and on a system that no longer
+starts: from the recovery shell, `lp-chroot` then `lp-rollback`.
+"""
+import json, os, subprocess, sys, tarfile
+
+LAST = "/var/lib/lp-rollback/last"
+
+
+def say(*a):
+    print(*a, flush=True)
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        say("lp-rollback: run it as root (sudo lp-rollback)")
+        return 1
+    try:
+        meta = json.load(open(LAST + "/meta.json"))
+    except (OSError, ValueError):
+        say("lp-rollback: there is no update to undo")
+        return 1
+    ch, added = meta["changed"], meta["added"]
+    when = subprocess.run(["date", "-d", "@%d" % meta["time"], "+%Y-%m-%d %H:%M"],
+                          capture_output=True, text=True).stdout.strip()
+    say("The last update (%s) changed:" % when)
+    for p, v in sorted(ch.items()):
+        say("  %-32s %s -> %s" % (p, v["old"], v["new"] or "(removed)"))
+    for p in added:
+        say("  %-32s (new)" % p)
+    if "--list" in argv:
+        return 0
+    if "--yes" not in argv:
+        try:
+            if input("Undo it? [y/N] ").strip().lower() not in ("y", "yes"):
+                return 1
+        except EOFError:
+            return 1
+
+    # What the new versions installed that the old ones did not.
+    now = {}
+    for p in ch:
+        r = subprocess.run(["dpkg-query", "-L", p], capture_output=True, text=True)
+        now[p] = [f for f in r.stdout.splitlines() if f.startswith("/")] if r.returncode == 0 else []
+
+    if added:
+        say("Removing what the update added: %s" % " ".join(added))
+        subprocess.run(["dpkg", "--purge", "--force-depends", "--force-remove-essential"] + added)
+
+    say("Putting back %d packages..." % len(ch))
+    with tarfile.open(LAST + "/files.tar") as t:
+        t.extractall("/", numeric_owner=True)
+
+    old_files = meta.get("files", {})
+    stale = 0
+    for p, files in now.items():
+        keep = set(old_files.get(p, []))
+        for f in files:
+            if f not in keep and (os.path.isfile(f) or os.path.islink(f)) and not os.path.isdir(f):
+                try:
+                    os.unlink(f)
+                    stale += 1
+                except OSError:
+                    pass
+    subprocess.run(["ldconfig"])
+    os.rename(LAST, LAST + ".undone")
+    say("Done: %d packages back as they were, %d files of the newer versions removed." %
+        (len(ch), stale))
+    say("Restart the computer to be sure everything uses the old versions.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

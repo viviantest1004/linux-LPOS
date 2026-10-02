@@ -1,0 +1,38 @@
+# 60_lp-fonts.gschema.override - the interface, document and terminal faces,
+# how they are antialiased, and the pointer, as every GTK application on
+# Wayland actually reads them.
+#
+# GTK 3 and GTK 4 on Wayland take these keys from GSettings
+# (org.gnome.desktop.interface), and a GSettings value - even an unset one,
+# which means the schema default - outranks ~/.config/gtk-*/settings.ini.
+# Measured on this base in a headless session: with only settings.ini
+# saying "Pretendard Variable 10.5", both toolkits reported gtk-font-name
+# "Cantarell 11", the GNOME default; Cantarell is not installed, so every
+# label fell back through fontconfig at 11pt instead of 10.5, and in a
+# Korean session to Noto Sans CJK KR. The same is true of the icon theme
+# and the title-bar buttons, which belong to the desktop-shell track.
+# Changing the schema defaults here fixes it for every account at once,
+# including ones made after the image was built, and still lets a person's
+# own choice (written to dconf by Settings) win.
+#
+# Installed to /usr/share/glib-2.0/schemas/; glib-compile-schemas must run
+# on that directory afterwards (the image build does it). The fontconfig
+# rules in /etc/fonts/local.conf have the last word on rendering anyway;
+# these keep what GTK believes in step with what it gets.
+
+[org.gnome.desktop.interface]
+# 10.5pt is the design system's 14px body text at GTK's 96 dpi. The output
+# scale (2 on the XPS panel) multiplies it; this number stays 10.5.
+font-name='Pretendard Variable 10.5'
+document-font-name='Pretendard Variable 11'
+monospace-font-name='D2Coding 10.5'
+# Greyscale, not subpixel, and slight hinting: /etc/fonts/local.conf says why.
+font-antialiasing='grayscale'
+font-hinting='slight'
+# 16 logical pixels: 32 on a panel at scale 2 (a 4K laptop, a Retina VM
+# window), where 24 gave a 48-pixel pointer that looked oversized next to
+# everything else. Adwaita's smallest image is 24, so at scale 1 the
+# pointer stays 24. The same size everywhere: the compositors (sway's
+# seat, wayfire.ini) and Xwayland (XCURSOR_SIZE, session-run).
+cursor-theme='Adwaita'
+cursor-size=16

@@ -1,0 +1,114 @@
+#!/usr/bin/python3
+"""lp-rollback-save - what apt is about to replace, kept so it can come back.
+
+apt runs this before it hands packages to dpkg (DPkg::Pre-Install-Pkgs,
+/etc/apt/apt.conf.d/80lp-rollback), with the list of what it will do on
+stdin (protocol version 2). For every package it is about to upgrade,
+downgrade or remove, the files that package has installed right now go
+into a tar, with dpkg's own record of it; the packages it is about to
+install for the first time are listed. `lp-rollback` puts that back.
+
+LP-ROOT is ext4: no snapshots, no second root to boot. This is the part
+of "undo the last update" a package manager can do by itself, and it is
+the part that goes wrong in practice - an upgrade that leaves a program
+or the desktop broken.
+
+One snapshot is kept, of the last apt run that changed anything: the
+most recent update is the one to undo. A snapshot that would not fit
+(less than twice its size free) is skipped with a warning rather than
+filling the disk in the middle of an upgrade.
+"""
+import json, os, shutil, subprocess, sys, tarfile, time
+
+TOP = "/var/lib/lp-rollback"
+NEW = TOP + "/new"
+LAST = TOP + "/last"
+DPKG = "/var/lib/dpkg"
+
+
+def installed_files(pkg):
+    r = subprocess.run(["dpkg-query", "-L", pkg], capture_output=True, text=True)
+    if r.returncode != 0:
+        return []
+    out = []
+    for p in r.stdout.splitlines():
+        if p.startswith("/") and (os.path.islink(p) or os.path.isfile(p)):
+            out.append(p)
+    return out
+
+
+def info_files(pkg):
+    base = pkg.split(":")[0]
+    res = []
+    for n in os.listdir(DPKG + "/info"):
+        stem = n.rsplit(".", 1)[0]
+        if stem == base or stem.startswith(base + ":"):
+            res.append(os.path.join(DPKG, "info", n))
+    return res
+
+
+def main():
+    lines = sys.stdin.read().splitlines()
+    if not lines or not lines[0].startswith("VERSION 2"):
+        return 0                       # not the protocol asked for: stay out of the way
+    try:
+        body = lines[lines.index("") + 1:]
+    except ValueError:
+        return 0
+    changed, added = {}, set()
+    for l in body:
+        f = l.split()
+        if len(f) < 5:
+            continue
+        pkg, old, _dir, new, action = f[0], f[1], f[2], f[3], f[4]
+        if action == "**CONFIGURE**":
+            continue
+        if old == "-":
+            added.add(pkg)
+        else:
+            changed[pkg] = {"old": old, "new": new if new != "-" else None}
+    if not changed and not added:
+        return 0
+
+    files, info = [], []
+    for pkg in changed:
+        files += installed_files(pkg)
+        info += info_files(pkg)
+    size = 0
+    for p in files + info:
+        try:
+            size += os.lstat(p).st_size
+        except OSError:
+            pass
+    os.makedirs(TOP, mode=0o700, exist_ok=True)
+    free = shutil.disk_usage(TOP).free
+    if size * 2 > free:
+        print("lp-rollback: not keeping a copy of this update (%d MB, %d MB free) - "
+              "it could not be undone" % (size >> 20, free >> 20), file=sys.stderr)
+        return 0
+
+    shutil.rmtree(NEW, ignore_errors=True)
+    os.makedirs(NEW, mode=0o700)
+    with tarfile.open(NEW + "/files.tar", "w") as t:
+        for p in files + info + [DPKG + "/status"]:
+            try:
+                t.add(p, arcname=p.lstrip("/"), recursive=False)
+            except OSError:
+                pass
+    lists = {pkg: installed_files(pkg) for pkg in changed}
+    with open(NEW + "/meta.json", "w") as f:
+        json.dump({"time": int(time.time()), "changed": changed,
+                   "added": sorted(added), "files": lists}, f)
+    shutil.rmtree(LAST, ignore_errors=True)
+    os.rename(NEW, LAST)
+    print("lp-rollback: this update can be undone with `sudo lp-rollback` "
+          "(%d packages, %d MB kept)" % (len(changed) + len(added), size >> 20), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:             # never stop an upgrade over its own backup
+        print("lp-rollback: could not keep a copy of this update: %s" % e, file=sys.stderr)
+        sys.exit(0)

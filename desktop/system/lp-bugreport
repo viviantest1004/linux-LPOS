@@ -1,0 +1,56 @@
+#!/bin/bash
+# lp-bugreport - the logs a bug report needs, in one file.
+#
+#   lp-bugreport            write ~/lp-report-DATE.tar.gz
+#   lp-bugreport DIR        write it into DIR (a USB drive: /media/...)
+#
+# What is in it: the kernel's messages of this boot, the session's log
+# (/data/log/session.log, every start of the desktop), the compositor's
+# log and the previous one, the desktop pieces' logs, which compositor
+# was chosen and why, the hardware (lspci, lsusb, the displays), the
+# kernel's command line, the firmware files the kernel asked for and did
+# not find, and the LP version. No passwords, keys or files of the person:
+# nothing under ~ but LP's own logs. Run it as the person; with sudo the
+# kernel's log is complete (it is readable only by root on some systems).
+set -u
+out_dir="${1:-$HOME}"
+stamp=$(date +%Y%m%d-%H%M%S)
+name="lp-report-$stamp"
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+d="$tmp/$name"
+mkdir -p "$d"
+
+run() {  # run FILE CMD...: its output (and errors) into FILE
+    local f=$1; shift
+    "$@" > "$d/$f" 2>&1 || true
+}
+take() { # take SRC [NAME]
+    test -r "$1" && cp -L "$1" "$d/${2:-$(basename "$1")}" 2>/dev/null || true
+}
+
+run version.txt sh -c 'cat /etc/os-release; echo; cat /etc/lp/version 2>/dev/null; uname -a'
+run cmdline.txt cat /proc/cmdline
+run dmesg.txt dmesg
+run firmware-missing.txt sh -c 'dmesg 2>/dev/null | grep -i "firmware\|failed to load\|direct firmware load"'
+run lspci.txt lspci -nnk
+run lsusb.txt lsusb
+run cpu.txt sh -c 'grep -m1 "model name" /proc/cpuinfo; grep -m1 microcode /proc/cpuinfo'
+run memory.txt free -m
+run disks.txt lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINT
+run power.txt sh -c 'cat /sys/power/mem_sleep; lp-tune status 2>/dev/null'
+run displays.txt wlr-randr
+run compositor.txt sh -c 'cat /run/lp-session/compositor; test -e /run/lp-session/safe && echo "safe mode: $(cat /run/lp-session/safe)"'
+run devices.txt sh -c 'ls -l /dev/dri /dev/input /dev/snd'
+take /data/log/session.log
+take "$HOME/.cache/lp/wayfire.log"
+take "$HOME/.cache/lp/wayfire.log.old"
+if test -d "${XDG_RUNTIME_DIR:-/nonexistent}/lp-shell" ; then
+    mkdir -p "$d/lp-shell"
+    cp "$XDG_RUNTIME_DIR"/lp-shell/*.log "$d/lp-shell/" 2>/dev/null || true
+fi
+
+mkdir -p "$out_dir" || exit 1
+tar -C "$tmp" -czf "$out_dir/$name.tar.gz" "$name" || exit 1
+sync
+echo "$out_dir/$name.tar.gz ($(du -h "$out_dir/$name.tar.gz" | cut -f1))"

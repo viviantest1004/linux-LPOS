@@ -1,0 +1,36 @@
+#!/bin/sh
+# lp-input-lang [toggle|en|ko] - switch the language typing produces.
+#
+# Super+Space runs this under both compositors (Settings > Keyboard >
+# Shortcuts can move it; the 한/영 key, Right Alt and Shift+Space are the
+# input method's own and never come here). Under wayfire the laptop's
+# keys go through fcitx5 and the on-screen keyboard through lp-osk, so
+# both are set, to the same language, and never disagree about which
+# one comes out; under sway lp-osk is both. The top bar's EN/한 follows
+# either by itself.
+want=${1:-toggle}
+case $want in
+    toggle|en|ko) ;;
+    *) echo "usage: lp-input-lang [toggle|en|ko]" >&2; exit 2 ;;
+esac
+# fcitx5-remote prints 1 (keys as printed) or 2 (Hangul) when fcitx5 is
+# running, 0 or nothing when it is not.
+#
+# Only a fcitx5 that is already running is asked. fcitx5-remote is a
+# D-Bus call, and the session bus starts fcitx5 for it (Debian ships
+# org.fcitx.Fcitx5.service): under sway, which never starts fcitx5, the
+# first Super+Space started one. The top bar follows fcitx5 whenever it
+# is up, so from then on its EN/한 showed that idle fcitx5 and not
+# lp-osk, which does the typing there: after Shift+Space or Right Alt it
+# read EN over Hangul coming out, and this toggle went by the wrong one.
+st=
+if pgrep -x -u "$(id -u)" fcitx5 > /dev/null 2>&1; then
+    st=$(fcitx5-remote 2>/dev/null)
+fi
+if [ "$st" = 1 ] || [ "$st" = 2 ]; then
+    if [ "$want" = toggle ]; then
+        if [ "$st" = 2 ]; then want=en; else want=ko; fi
+    fi
+    if [ "$want" = ko ]; then fcitx5-remote -o; else fcitx5-remote -c; fi
+fi
+exec lp-osk lang "$want"

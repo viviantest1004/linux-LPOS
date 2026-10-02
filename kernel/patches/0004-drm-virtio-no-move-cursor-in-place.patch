@@ -1,0 +1,29 @@
+drm/virtio: no MOVE_CURSOR when the cursor did not move
+
+LP-only. virtio_gpu_cursor_plane_update() sends the host a MOVE_CURSOR
+whenever the cursor plane is part of an atomic commit and its FB did not
+change - also when its position did not change either. wlroots puts the
+cursor plane in every commit, so every frame of the screen came with a
+cursor "move" to where the cursor already was, and under QEMU with SPICE
+each one went on to the viewer through SPICE's cursor channel. A commit
+that leaves the cursor where it is now sends nothing for it.
+
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -374,6 +374,16 @@
+ 			output->cursor.hot_y = cpu_to_le32(0);
+ 		}
+ 	} else {
++		/*
++		 * LP: the same image at the same place is not a move. A
++		 * compositor that puts the cursor plane in every atomic commit
++		 * (wlroots) otherwise sends the host a MOVE_CURSOR with every
++		 * frame of the screen, and SPICE forwards each one to the
++		 * viewer.
++		 */
++		if (plane->state->crtc_x == old_state->crtc_x &&
++		    plane->state->crtc_y == old_state->crtc_y)
++			return;
+ 		DRM_DEBUG("move +%d+%d\n",
+ 			  plane->state->crtc_x,
+ 			  plane->state->crtc_y);

@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Files
+Name[ko]=파일
+GenericName=File Manager
+GenericName[ko]=파일 관리자
+Comment=Browse files and folders
+Comment[ko]=파일과 폴더를 봅니다
+Exec=lp-files %U
+Icon=system-file-manager
+Terminal=false
+Categories=System;Utility;FileTools;FileManager;
+MimeType=inode/directory;
+Keywords=files;folder;download;documents;pictures;trash;
+Keywords[ko]=파일;폴더;다운로드;문서;사진;휴지통;
+StartupNotify=true
+
+# 이 파일의 이름은 lp-files.desktop 인데 창의 app_id 는
+# org.lpzero.Files 다. 웨이랜드에서 컴포지터는 app_id 로 창과 항목을
+# 잇기 때문에, 둘이 다르면 컴포지터가 이 창을 어느 앱의 것으로도 보지
+# 못한다. 이름을 맞추려면 app_id 가 lp-files 여야 하는데 그것은 점이
+# 없어 유효한 애플리케이션 ID 가 아니다. 그래서 StartupWMClass 로
+# 이어 준다.
+StartupWMClass=org.lpzero.Files

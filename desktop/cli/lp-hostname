@@ -1,0 +1,72 @@
+#!/bin/sh
+# lp-hostname - the machine's name. Installed as hostnamectl too.
+#
+#   lp-hostname                  the name, the system, the kernel
+#   lp-hostname set NAME         call this machine NAME (administrator)
+#   hostnamectl [status]         the same, in hostnamectl's words
+#   hostnamectl set-hostname NAME / hostnamectl hostname [NAME]
+#
+# The name is kept in /etc/hostname (read at every boot by the setup
+# gate), mirrored in /etc/hosts as 127.0.1.1 so the machine can resolve
+# itself, and given to the running kernel at once. Debian's hostnamectl
+# asks systemd-hostnamed over D-Bus; there is no systemd here.
+set -u
+
+say() { printf '%s\n' "$*"; }
+die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
+
+current() {
+    if test -s /etc/hostname; then
+        read -r n < /etc/hostname
+        say "$n"
+    else
+        hostname
+    fi
+}
+
+status() {
+    os=LP
+    test -r /etc/os-release && os=$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-$NAME}")
+    say " Static hostname: $(current)"
+    say "Operating System: $os"
+    say "          Kernel: $(uname -s) $(uname -r)"
+    say "    Architecture: $(uname -m)"
+}
+
+set_name() {
+    n=$1
+    # RFC 1123: letters, digits and hyphens, 1-63, no hyphen at either end.
+    case $n in
+        ""|-*|*-|*[!A-Za-z0-9-]*) die "use letters, digits and hyphens, not starting or ending with a hyphen: '$n'" ;;
+    esac
+    test ${#n} -le 63 || die "at most 63 characters"
+    test "$(id -u)" = 0 || die "only the administrator can rename the machine: sudo ${0##*/} set $n"
+    old=$(current)
+    say "$n" > /etc/hostname.new && mv -f /etc/hostname.new /etc/hostname || die "could not write /etc/hostname"
+    if test -f /etc/hosts; then
+        if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+            sed "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$n/" /etc/hosts > /etc/hosts.new && mv -f /etc/hosts.new /etc/hosts
+        else
+            printf '127.0.1.1\t%s\n' "$n" >> /etc/hosts
+        fi
+    fi
+    hostname "$n" 2>/dev/null || true
+    say "This machine is now called $n (was $old)"
+}
+
+case "${0##*/}" in
+    hostnamectl)
+        case ${1:-status} in
+            status) status ;;
+            hostname) if test $# -ge 2; then set_name "$2"; else current; fi ;;
+            set-hostname) test $# -ge 2 || die "set-hostname NAME"; set_name "$2" ;;
+            *) die "unknown command '${1:-}'" ;;
+        esac ;;
+    *)
+        case ${1:-status} in
+            status) status ;;
+            set) test $# -ge 2 || die "set NAME"; set_name "$2" ;;
+            -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+            *) die "unknown command '${1:-}' (lp-hostname --help)" ;;
+        esac ;;
+esac

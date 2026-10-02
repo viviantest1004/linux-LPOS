@@ -1,0 +1,67 @@
+#!/usr/bin/python3
+"""lp-setup-run - ask the setup gate (root) to run one allowed command.
+
+The installer and first-boot windows run as uid 1000 in a kiosk
+compositor, because sway refuses to run as root; the work they start
+(partitioning, writing /etc/shadow, joining a Wi-Fi network) needs root.
+lp-setup-gate is that root, listening on /run/lp-setup/sock. This is its
+client, and it behaves like the command it stands in for: its output is
+the command's output, its exit status the command's exit status.
+
+    lp-setup-run lp-install list --json
+    lp-setup-run power restart
+
+It is also installed as links named after the commands
+(/usr/local/lib/lp/relay/lp-install, .../lp-net, .../power), and the gate
+points LP_INSTALL and LP_NET at those - so the windows call "lp-install"
+the same way whether they run privileged here or against a mock in a
+test rig.
+
+stdin is passed on only for --password-stdin, and only its first line:
+reading stdin to its end would hang on a window that never closes it.
+What may run is the gate's decision (lp-setup-gate, allowed()), not
+this program's.
+"""
+import json
+import os
+import socket
+import sys
+
+SOCK = "/run/lp-setup/sock"
+
+
+def main():
+    name = os.path.basename(sys.argv[0])
+    argv = sys.argv[1:] if name == "lp-setup-run" else [name] + sys.argv[1:]
+    if not argv:
+        print("usage: lp-setup-run COMMAND [ARGS...]", file=sys.stderr)
+        return 2
+    stdin = ""
+    if "--password-stdin" in argv:
+        stdin = sys.stdin.readline()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCK)
+    except OSError as e:
+        print("lp-setup-run: the setup gate is not running (%s)" % e, file=sys.stderr)
+        return 125
+    f = s.makefile("rwb", buffering=0)
+    f.write((json.dumps({"argv": argv, "stdin": stdin}) + "\n").encode())
+    rc = 1
+    out = sys.stdout.buffer
+    for line in iter(f.readline, b""):
+        if line.startswith(b"O "):
+            out.write(line[2:])
+            out.flush()
+        elif line.startswith(b"X "):
+            parts = line.split(None, 2)
+            rc = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+            if len(parts) > 2:
+                sys.stderr.write("lp-setup-run: %s" % parts[2].decode(errors="replace"))
+            break
+    s.close()
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

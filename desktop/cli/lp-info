@@ -1,0 +1,149 @@
+#!/bin/sh
+# lp-info - the machine at a glance: processor, memory, disk, network,
+# graphics, battery, and any service that is down.
+#
+#   lp-info            everything, one line each
+#   lp-info cpu|mem|disk|net|gpu|services
+#                      one of them
+#
+# `info` (userland) is the long report, for pasting into a question;
+# this is the short one, for a look.
+set -u
+
+say() { printf '%s\n' "$*"; }
+row() { printf '  %-9s %s\n' "$1" "$2"; }
+
+human() {   # bytes -> "1.2 GB", in whole-number arithmetic: LP's own awk
+            # has no floating point, and this has to run on every LP
+    v=$(( $1 * 10 )); i=0
+    while test $v -ge 10240 && test $i -lt 4; do
+        v=$(( v / 1024 )); i=$((i + 1))
+    done
+    set -- B KB MB GB TB
+    shift $i
+    if test $i -eq 0; then
+        printf '%d %s' $((v / 10)) "$1"
+    else
+        printf '%d.%d %s' $((v / 10)) $((v % 10)) "$1"
+    fi
+}
+
+cpu() {
+    model=$(awk -F': *' '/^model name/ { print $2; exit }' /proc/cpuinfo)
+    test -n "$model" || model=$(awk -F': *' '/^Hardware|^Model/ { print $2; exit }' /proc/cpuinfo)
+    n=$(grep -c '^processor' /proc/cpuinfo)
+    # Busy: two samples of /proc/stat half a second apart.
+    # (Only the cpu line is read: the intr line below it has thousands
+    # of fields, more than LP's awk takes.)
+    set -- $(grep '^cpu ' /proc/stat)
+    t0=$(($2 + $3 + $4 + $5 + $6 + $7 + $8)) i0=$(($5 + $6))
+    sleep 1
+    set -- $(grep '^cpu ' /proc/stat)
+    t=$(($2 + $3 + $4 + $5 + $6 + $7 + $8 - t0)) i=$(($5 + $6 - i0))
+    busy=0
+    test $t -gt 0 && busy=$(( 100 * (t - i) / t ))
+    temp=""
+    for z in /sys/class/thermal/thermal_zone*/temp; do
+        test -r "$z" || continue
+        read -r c < "$z"
+        test "$c" -gt 0 2>/dev/null && { temp=" · $((c / 1000))°C"; break; }
+    done
+    row CPU "${model:-unknown} · $n threads · $busy% busy$temp"
+}
+
+mem() {
+    set -- $(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } END { print t, a }' /proc/meminfo)
+    used=$((($1 - $2) * 1024)); total=$(($1 * 1024))
+    row Memory "$(human $used) of $(human $total) used ($(( ($1 - $2) * 100 / $1 ))%)"
+}
+
+disk() {
+    df -P / 2>/dev/null | awk 'NR == 2 { print $2, $3 }' | {
+        read -r tot use
+        row Disk "$(human $((use * 1024))) of $(human $((tot * 1024))) used on / ($((use * 100 / tot))%)"
+    }
+}
+
+net() {
+    out=""
+    for d in /sys/class/net/*; do
+        i=${d##*/}
+        test "$i" = lo && continue
+        read -r st < "$d/operstate" 2>/dev/null || st=unknown
+        addr=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{ print $4; exit }')
+        kind=wired
+        test -d "$d/wireless" && kind=Wi-Fi
+        if test -n "$addr"; then
+            out="$out${out:+, }$i ($kind) $addr"
+        else
+            out="$out${out:+, }$i ($kind) $st"
+        fi
+    done
+    row Network "${out:-no network devices}"
+}
+
+gpu() {
+    g=""
+    for c in /sys/class/drm/card[0-9]; do
+        test -e "$c/device/driver" || continue
+        drv=$(basename "$(readlink -f "$c/device/driver")")
+        name=""
+        if command -v lspci > /dev/null 2>&1; then
+            slot=$(basename "$(readlink -f "$c/device")")
+            name=$(lspci -s "$slot" 2>/dev/null | sed 's/^[^ ]* [^:]*: //')
+        fi
+        g="$g${g:+, }${name:-$drv} ($drv)"
+    done
+    comp=""
+    test -s /run/lp-session/compositor && comp=" · desktop: $(head -1 /run/lp-session/compositor)"
+    row Graphics "${g:-none}$comp"
+}
+
+battery() {
+    for b in /sys/class/power_supply/BAT*; do
+        test -d "$b" || continue
+        read -r cap < "$b/capacity" 2>/dev/null || continue
+        read -r st < "$b/status" 2>/dev/null || st=""
+        row Battery "$cap% $(echo "$st" | tr 'A-Z' 'a-z')"
+        return
+    done
+}
+
+services() {
+    command -v service > /dev/null 2>&1 || { row Services "no service list"; return; }
+    down=$(service 2>/dev/null | awk '/not running/ { print $1 }')
+    bad=""
+    for s in $down; do
+        # No watchdog hardware (a VM, a desktop board): nothing to arm.
+        test "$s" = watchdog && ! test -e /dev/watchdog && continue
+        grep -qx "$s" /data/services.disabled 2>/dev/null && continue
+        bad="$bad${bad:+, }$s"
+    done
+    if test -n "$bad"; then
+        row Services "DOWN: $bad (service status NAME)"
+    else
+        row Services "all running"
+    fi
+}
+
+up() {
+    read -r s _ < /proc/uptime
+    s=${s%.*}
+    row "Up for" "$((s / 86400)) d $((s % 86400 / 3600)) h $((s % 3600 / 60)) min"
+}
+
+case ${1:-all} in
+    cpu) cpu ;;
+    mem|memory) mem ;;
+    disk) disk ;;
+    net|network) net ;;
+    gpu|graphics) gpu ;;
+    services|failed) services ;;
+    all)
+        os=LP
+        test -r /etc/os-release && os=$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-$NAME}")
+        say "$os on $(hostname)"
+        cpu; mem; disk; net; gpu; battery; services; up ;;
+    -h|--help|help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) printf 'lp-info: unknown part %s (lp-info --help)\n' "$1" >&2; exit 1 ;;
+esac

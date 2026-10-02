@@ -1,0 +1,359 @@
+/* gtk.css - the same window, for the GTK 3 applications on this desktop.
+ *
+ * Installed twice. As the LP theme (/usr/share/themes/LP/gtk-3.0/gtk.css),
+ * with GTK's own Adwaita (dark) imported in front of it by mkdesktop.sh:
+ * GTK_THEME=LP makes this the whole theme, and without that import every
+ * widget this file does not mention - menus, menu bars, toolbars, entries,
+ * scrollbars - came out in GTK's unstyled fallback (LibreOffice's menu bar
+ * read "FileEditViewInsert..." with no space between the words). And as
+ * ~/.config/gtk-3.0/gtk.css, without the import, where GTK reads it above
+ * each application's own stylesheet, so libhandy's title bar buttons come
+ * out the same as everyone else's.
+ *
+ * Read desktop/theme/gtk-4.0/gtk.css first: it carries the reasoning, and
+ * this file only says where GTK 3 makes the same thing come out differently.
+ *
+ * What GTK 3 cannot be told: -gtk-icon-size and border-spacing arrived in
+ * GTK 4, so glyph sizes and the gaps inside a header are the application's;
+ * and the window is rounded on its top two corners only - GTK 3 paints the
+ * window's own background square under the frame, and a rounded bottom
+ * corner would show the fill poking out past its hairline.
+ */
+
+/* ── the mockup's values ──────────────────────────────────────────────── */
+
+@define-color lp_window        #152331;
+@define-color lp_window_back   #121e2a;
+@define-color lp_header        #1b2d40;
+@define-color lp_header_back   #172636;
+@define-color lp_edge          #2a4058;
+@define-color lp_edge_back     #233649;
+
+@define-color lp_sidebar       #111c27;
+@define-color lp_sidebar_edge  #22364a;
+@define-color lp_sidebar_sel   #1f3a55;
+
+@define-color lp_text          #eaf2f8;
+@define-color lp_text_back     #6b8499;
+@define-color lp_icon          #9fb3c4;
+@define-color lp_icon_back     #4a6178;
+@define-color lp_row           #9fb3c4;
+@define-color lp_row_icon      #7f95a8;
+@define-color lp_group         #4a6178;
+
+/* ── the window ───────────────────────────────────────────────────────── */
+
+window.background {
+  background-color: @lp_window;
+  color: @lp_text;
+}
+
+window.background:backdrop {
+  background-color: @lp_window_back;
+}
+
+/* GTK 3 puts the frame on a node of its own, `decoration`, where GTK 4 puts it
+ * on the window. The border is still drawn as a spread shadow rather than as a
+ * border, for the same reason: the window's contents are drawn over this node
+ * and a real border would end up underneath them.
+ *
+ * No margin is set here. GTK 3 works out the invisible frame around a CSD
+ * window from this node's border, padding and margin together with the
+ * shadow's extents, and that frame is what a pointer grabs to resize. The base
+ * theme's margin is sized for its own resize handles; this file has no value
+ * of the owner's to put there, so it leaves it alone. */
+decoration {
+  border-radius: 12px 12px 0 0;
+  box-shadow:
+    0 0 0 0.5px @lp_edge,
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 10px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* Alpha 0 rather than `none`, so the extents above stay put and the window
+ * does not jump when focus leaves it. */
+decoration:backdrop {
+  box-shadow:
+    0 0 0 0.5px @lp_edge_back,
+    0 1px 2px rgba(0, 0, 0, 0),
+    0 10px 28px rgba(0, 0, 0, 0);
+}
+
+/* Tiled keeps the mockup's border - two tiled windows meet along it - and
+ * loses only the blur. The transparent 20px layer paints nothing and exists
+ * because GTK sizes the invisible frame a pointer grabs to resize from the
+ * shadow's extents, and a 0.5px frame cannot be grabbed. The stock theme
+ * reserves the same 20px for tiled windows. */
+.tiled decoration,
+.tiled-top decoration, .tiled-right decoration,
+.tiled-bottom decoration, .tiled-left decoration {
+  border-radius: 0;
+  box-shadow:
+    0 0 0 0.5px @lp_edge,
+    0 0 0 20px transparent;
+}
+
+.tiled decoration:backdrop,
+.tiled-top decoration:backdrop, .tiled-right decoration:backdrop,
+.tiled-bottom decoration:backdrop, .tiled-left decoration:backdrop {
+  box-shadow:
+    0 0 0 0.5px @lp_edge_back,
+    0 0 0 20px transparent;
+}
+
+/* Maximised and fullscreen lose the whole shadow, hairline included: that
+ * invisible frame is sized from it, and any layer left here keeps a maximised
+ * window off the screen edge it was maximised to.
+ *
+ * Last, and after the tiled rules, for two reasons. A compositor may report a
+ * window as maximised and tiled at once, and these selectors are no more
+ * specific than the tiled ones - in that tie the later rule wins, and the
+ * later one has to be the one that lets the window fill the screen. The
+ * backdrop states are spelled out for the same reason: they tie with
+ * `decoration:backdrop` above, and a tie decided three rules away is a tie
+ * waiting to be broken by an edit. */
+.maximized decoration, .fullscreen decoration {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.maximized decoration:backdrop, .fullscreen decoration:backdrop {
+  box-shadow: none;
+}
+
+/* ── the sidebar ──────────────────────────────────────────────────────── */
+
+/* .navigation-sidebar is a GTK 4 style class and has no GTK 3 equivalent, so
+ * only .sidebar is available to key off here.
+ *
+ * separator is excluded because .sidebar really does land on separator nodes -
+ * the stock theme styles `separator.sidebar`, and writes `separator:not(.sidebar)`
+ * where it means the other kind. A separator handed a sidebar's min-width is an
+ * 82px bar down the middle of the window.
+ *
+ * The mockup gives 82-96px; GTK CSS has min-width and no max-width, so the
+ * floor is stated and the ceiling belongs to whoever sizes the pane. */
+.sidebar:not(separator) {
+  min-width: 82px;
+  padding: 8px 5px;
+  background-color: @lp_sidebar;
+}
+
+.sidebar:not(separator):dir(ltr) {
+  border-right: 0.5px solid @lp_sidebar_edge;
+  border-left-style: none;
+}
+
+.sidebar:not(separator):dir(rtl) {
+  border-left: 0.5px solid @lp_sidebar_edge;
+  border-right-style: none;
+}
+
+.sidebar list, .sidebar .view, .sidebar viewport {
+  background-color: transparent;
+}
+
+/* The sidebar keeps its colours behind. It has no shadow to lose, and dimming
+ * it is the thing the mockup rules out. GTK 3's Adwaita darkens the fill and
+ * the edge together in backdrop, so both are restated. */
+.sidebar:not(separator):backdrop {
+  background-color: @lp_sidebar;
+  border-color: @lp_sidebar_edge;
+}
+
+.sidebar list row {
+  min-height: 0;
+  margin: 0;
+  padding: 4px 7px;
+  border-radius: 5px;
+  font-size: 8.25pt;
+  color: @lp_row;
+}
+
+/* opacity is pinned because the stock theme fades a sidebar icon to 0.7, and a
+ * faded #8a8a8a is not #8a8a8a. The icon is quiet because of its colour. */
+.sidebar list row image {
+  color: @lp_row_icon;
+  opacity: 1;
+}
+
+.sidebar list row:selected,
+.sidebar list row:selected:backdrop {
+  background-color: @lp_sidebar_sel;
+  color: @lp_text;
+}
+
+/* GTK 3 applications rarely mark a sidebar group heading with anything a
+ * stylesheet can find; this catches the ones that use .heading, and misses the
+ * rest. The mockup gives no weight for it, so none is set. */
+.sidebar .heading {
+  font-size: 7.5pt;
+  color: @lp_group;
+}
+
+/* ── window chrome: the title bar and its three buttons ───────────────── */
+
+/* The same title bar in every GTK 3 window, the ones with a header bar of
+ * their own (Files, Disks, the image viewer) and the ones GTK gives a
+ * plain one because they have none (LibreOffice, Geany, GParted - lp-csd
+ * makes those draw it themselves). gtk-4.0/gtk.css draws the same bar for
+ * GTK 4 and libadwaita, to the pixel: 46px bar, 26px round buttons 8px
+ * apart, the glyphs from the LP icon theme (window-*-symbolic).
+ *
+ * This file is also installed as ~/.config/gtk-3.0/gtk.css, where GTK
+ * reads it above every application's own stylesheet - libhandy's
+ * included, which otherwise draws its buttons its own way. The
+ * .default-decoration selectors are spelled out because the base theme
+ * sizes a plain title bar with them, and a rule with fewer classes loses
+ * to it inside the same stylesheet. */
+headerbar,
+headerbar.titlebar,
+headerbar.default-decoration {
+  min-height: 46px;
+  padding: 0 10px;
+  background-color: @lp_header;
+  background-image: none;
+  border-width: 0 0 1px 0;
+  border-style: solid;
+  border-color: @lp_edge;
+  border-radius: 0;
+  box-shadow: inset 0 1px alpha(@lp_text, 0.05);
+}
+
+/* Rounded where it is the top of a window, to meet decoration's corners. */
+headerbar.titlebar,
+.titlebar headerbar,
+headerbar.default-decoration {
+  border-radius: 12px 12px 0 0;
+}
+
+/* A window with no header bar of its own has a menu or a toolbar right
+ * under this bar; it can be a little lower and still hold the buttons. */
+headerbar.default-decoration {
+  min-height: 40px;
+}
+
+headerbar:backdrop,
+headerbar.titlebar:backdrop,
+headerbar.default-decoration:backdrop {
+  background-color: @lp_header_back;
+  background-image: none;
+  border-color: @lp_edge_back;
+  box-shadow: none;
+}
+
+.maximized headerbar, .fullscreen headerbar, .tiled headerbar,
+.tiled-top headerbar, .tiled-right headerbar,
+.tiled-bottom headerbar, .tiled-left headerbar,
+.maximized headerbar.titlebar, .fullscreen headerbar.titlebar,
+.tiled headerbar.titlebar {
+  border-radius: 0;
+}
+
+headerbar .title {
+  font-size: 9.75pt;
+  font-weight: 600;
+  color: @lp_text;
+  padding: 0 12px;
+}
+
+headerbar .subtitle {
+  font-size: 8.25pt;
+  color: @lp_icon;
+}
+
+headerbar:backdrop .title {
+  color: @lp_text_back;
+}
+
+/* The application's own header buttons: colour only, size is theirs. */
+headerbar image {
+  color: @lp_icon;
+}
+
+headerbar:backdrop image {
+  color: @lp_icon_back;
+}
+
+/* The three buttons. Round, with a quiet fill so they read as buttons
+ * before the pointer finds them; brighter under the pointer; close turns
+ * red. Only the button draws - the glyph's own box stays clear, so a
+ * glyph that comes with a background of its own cannot show one. */
+headerbar button.titlebutton,
+headerbar.titlebar button.titlebutton,
+headerbar.default-decoration button.titlebutton,
+.titlebar button.titlebutton {
+  min-width: 26px;
+  min-height: 26px;
+  margin: 0 1px;
+  padding: 0;
+  border: none;
+  border-radius: 9999px;
+  outline-color: transparent;
+  background-image: none;
+  background-color: alpha(@lp_text, 0.10);
+  box-shadow: none;
+  text-shadow: none;
+  -gtk-icon-shadow: none;
+  color: @lp_text;
+  transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+
+headerbar button.titlebutton:hover,
+headerbar.titlebar button.titlebutton:hover,
+headerbar.default-decoration button.titlebutton:hover,
+.titlebar button.titlebutton:hover {
+  background-image: none;
+  background-color: alpha(@lp_text, 0.18);
+  color: @lp_text;
+}
+
+headerbar button.titlebutton:active,
+headerbar.titlebar button.titlebutton:active,
+headerbar.default-decoration button.titlebutton:active,
+.titlebar button.titlebutton:active {
+  background-image: none;
+  background-color: alpha(@lp_text, 0.26);
+}
+
+headerbar button.titlebutton.close:hover,
+headerbar.titlebar button.titlebutton.close:hover,
+headerbar.default-decoration button.titlebutton.close:hover,
+.titlebar button.titlebutton.close:hover {
+  background-color: #e5534b;
+  color: #ffffff;
+}
+
+headerbar button.titlebutton.close:active,
+headerbar.titlebar button.titlebutton.close:active,
+headerbar.default-decoration button.titlebutton.close:active,
+.titlebar button.titlebutton.close:active {
+  background-color: #c9433c;
+  color: #ffffff;
+}
+
+headerbar:backdrop button.titlebutton,
+headerbar.titlebar:backdrop button.titlebutton,
+headerbar.default-decoration:backdrop button.titlebutton,
+.titlebar:backdrop button.titlebutton {
+  background-color: alpha(@lp_text, 0.06);
+  color: @lp_text_back;
+}
+
+headerbar:backdrop button.titlebutton:hover,
+.titlebar:backdrop button.titlebutton:hover {
+  background-color: alpha(@lp_text, 0.18);
+  color: @lp_text;
+}
+
+button.titlebutton image {
+  color: inherit;
+  -gtk-icon-shadow: none;
+}
+
+/* The bar between the application's own buttons and these. */
+separator.titlebutton {
+  min-width: 0;
+  background: none;
+  border: none;
+}

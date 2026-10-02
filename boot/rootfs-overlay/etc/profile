@@ -1,0 +1,26 @@
+# /etc/profile - read by every interactive shell, before ~/.profile.
+#
+# This file is in the kernel image, so editing it here lasts until the
+# next reboot and no longer. Put your own settings in ~/.profile
+# instead: /root is a bind mount of /data/root, so that one is on the
+# card and survives.
+#
+#   edit ~/.profile
+#
+# Both files go through the same parser as the prompt, so functions and
+# if blocks work in them.
+
+# Where to look for programs. /data/bin is where `pkg` installs,
+# /data/python/bin is CPython and everything pip put beside it, and
+# /data/debian/usr/bin is only useful through `apt run` - it is left out
+# on purpose, because a Debian binary run without its tree finds none of
+# its libraries and fails in a way that reads as a broken package.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/data/bin:/data/python/bin
+
+# The pager and editor other programs ask about.
+PAGER=more
+EDITOR=edit
+
+# Coloured output needs a terminal that admits to having colour. The
+# framebuffer console and a serial line both do.
+TERM=linux

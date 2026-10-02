@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>linux-LP — 다운로드 / Download</title>
+<meta name="description" content="Claude Code가 처음부터 만든 초경량 리눅스 배포판. 라즈베리파이 제로 2 W, arm64 가상머신, amd64 PC용 이미지. A Linux distribution written from scratch by Claude Code.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>💾</text></svg>">
+<style>
+  :root {
+    --bg: #fbfbf9;
+    --panel: #ffffff;
+    --ink: #1b1b19;
+    --muted: #6b6b64;
+    --line: #e4e2dc;
+    --accent: #8a5a2b;
+    --accent-soft: #f3ece3;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1d1d22;
+      --ink: #eceae5;
+      --muted: #9b978e;
+      --line: #2e2e35;
+      --accent: #d9a066;
+      --accent-soft: #2a2018;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Apple SD Gothic Neo", "Noto Sans KR", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 840px; margin: 0 auto; padding: 0 20px 96px; }
+
+  header { padding: 76px 0 40px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 2.2rem; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .tag { color: var(--muted); margin: 0; font-size: 1.05rem; }
+  .by {
+    margin-top: 24px; padding: 14px 18px;
+    background: var(--accent-soft); border-radius: 8px;
+    font-size: 0.92rem; color: var(--ink);
+  }
+  .by a { color: var(--accent); }
+  .by + .by { margin-top: 10px; }
+
+  h2 {
+    font-size: 1.25rem; margin: 48px 0 6px; letter-spacing: -0.01em;
+  }
+  h2 .en {
+    display: block; font-size: 0.82rem; font-weight: 400;
+    color: var(--muted); letter-spacing: 0;
+  }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .en-line { color: var(--muted); font-size: 0.9rem; }
+
+  table.facts {
+    width: 100%; border-collapse: collapse; margin: 18px 0 8px;
+    font-size: 0.93rem;
+  }
+  table.facts td { padding: 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.facts td:first-child { color: var(--muted); width: 40%; padding-right: 16px; }
+
+  .grid { display: grid; gap: 16px; margin-top: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+  .card h3 { margin: 0 0 4px; font-size: 1.05rem; }
+  .card .for { color: var(--muted); font-size: 0.92rem; margin: 0 0 16px; }
+  .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .dl {
+    display: inline-block;
+    background: var(--accent); color: #fff;
+    text-decoration: none; font-weight: 600;
+    padding: 9px 18px; border-radius: 7px;
+    font-size: 0.95rem;
+  }
+  .dl:hover { filter: brightness(1.08); }
+  .size { color: var(--muted); font-size: 0.9rem; }
+
+  .hash {
+    margin-top: 14px; padding-top: 14px;
+    border-top: 1px solid var(--line);
+    font-size: 0.78rem; color: var(--muted);
+    font-family: var(--mono);
+    word-break: break-all; line-height: 1.5;
+  }
+  .hash b { color: var(--ink); font-weight: 600; font-family: inherit; }
+
+  pre {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 14px 16px;
+    overflow-x: auto; font-family: var(--mono);
+    font-size: 0.84rem; line-height: 1.6;
+  }
+  code { font-family: var(--mono); font-size: 0.88em; }
+
+  .warn {
+    border-left: 3px solid var(--accent);
+    padding: 2px 0 2px 16px; margin: 18px 0;
+    color: var(--muted); font-size: 0.94rem;
+  }
+  .warn b { color: var(--ink); }
+
+  ul { padding-left: 20px; margin: 0 0 14px; }
+  li { margin-bottom: 8px; }
+
+  footer {
+    margin-top: 72px; padding-top: 24px;
+    border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 0.88rem;
+  }
+  .lang { margin-top: 48px; }
+  .lang > h2:first-child {
+    border-top: 2px solid var(--line); padding-top: 40px; margin-top: 0;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>linux-LP</h1>
+  <p class="tag">처음부터 직접 만든 초경량 리눅스 배포판<br>
+     <span class="muted">A small Linux distribution, written from scratch</span></p>
+  <div class="by">
+    커널 설정부터 C 라이브러리, init, 셸, 130개 명령어까지
+    <strong>전부 <a href="https://claude.com/claude-code">Claude Code</a>가 썼습니다.</strong>
+    사람이 검토한 코드가 아닙니다 — 아래 <a href="#caveats">쓰기 전에 알아둘 것</a>을
+    꼭 읽어주세요.
+  </div>
+</header>
+
+<h2>이게 뭔가요<span class="en">What this is</span></h2>
+
+<p>512MB 램짜리 라즈베리파이 제로 2 W 한 대에 우분투를 올렸더니 아무것도 하기 전에
+   램의 절반이 사라져서, 그게 아까워서 만들기 시작한 배포판입니다. 만들다 보니 그 보드에만
+   매인 구석이 없어서 지금은 <strong>arm64 가상머신과 amd64 PC에서도</strong> 그대로 돕니다.</p>
+
+<p>시스템 전체가 커널 이미지 파일 <strong>하나</strong>이고, 부팅하면 램으로 풀립니다.
+   디스크 위의 어떤 것도 돌아가는 시스템의 일부가 아니라서, 전원을 갑자기 뽑아도
+   다음 부팅은 항상 멀쩡합니다.</p>
+
+<table class="facts">
+  <tr><td>시스템 전체</td><td>커널 + 유저랜드 파일 하나, 13~22MB</td></tr>
+  <tr><td>부팅 후 남는 램</td><td>512MB 보드에서 약 480MB</td></tr>
+  <tr><td>명령어</td><td>130개, 전부 자체 구현</td></tr>
+  <tr><td>SSH</td><td>기본 내장, 공개키 전용 (비밀번호 인증은 컴파일 자체를 안 함)</td></tr>
+  <tr><td>파이썬</td><td>CPython 3.12 + pip, manylinux 휠 설치됨</td></tr>
+  <tr><td>패키지</td><td>자체 <code>pkg</code>, 그리고 <code>apt</code> — 진짜 데비안 패키지</td></tr>
+  <tr><td>서버</td><td><code>httpd</code> 정적 웹서버, <code>netstat</code>, 사용자 서비스 등록</td></tr>
+  <tr><td>텍스트 도구</td><td><code>sed</code> <code>awk</code> <code>grep</code> <code>diff</code> — 정규식 엔진 하나를 공유</td></tr>
+  <tr><td>외장 드라이브</td><td>꽂으면 자동으로 붙고, 원하면 고정해서 계속 씁니다</td></tr>
+  <tr><td>라이선스</td><td>MIT</td></tr>
+</table>
+
+<h2>다운로드<span class="en">Download</span></h2>
+
+<div class="grid">
+  <div class="card">
+    <h3>라즈베리파이 제로 2 W</h3>
+    <p class="for">실기와 arm64 가상머신 둘 다. SD카드에 굽거나 UTM/QEMU에 붙이면 됩니다.<br>
+       <span class="en-line">Raspberry Pi Zero 2 W hardware and arm64 VMs alike.</span></p>
+    <div class="row">
+      <a class="dl" href="dist/@PI_NAME@">다운로드 / Download</a>
+      <span class="size">@PI_SIZE@ · xz</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@PI_HASH@</div>
+  </div>
+
+  <div class="card">
+    <h3>라즈베리파이 제로 W</h3>
+    <p class="for">1세대 Zero / Zero W. ARM1176(ARMv6) 32비트 — 제로 2 W 와는 명령어
+       집합이 아예 다른 기계라서 이미지도 별개입니다.<br>
+       <span class="en-line">Pi Zero and Zero W. ARMv6, 32-bit: a different
+       instruction set from the Zero 2 W, so a different image.</span></p>
+    <div class="row">
+      <a class="dl" href="dist/@ZEROW_NAME@">다운로드 / Download</a>
+      <span class="size">@ZEROW_SIZE@ · xz</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@ZEROW_HASH@</div>
+  </div>
+
+  <div class="card">
+    <h3>일반 PC / 데스크톱 가상머신</h3>
+    <p class="for">VMware, VirtualBox, QEMU/KVM, Hyper-V. UEFI 부팅입니다.<br>
+       <span class="en-line">Ordinary PCs and desktop VMs. Boots over UEFI.</span></p>
+    <div class="row">
+      <a class="dl" href="dist/@AMD_NAME@">다운로드 / Download</a>
+      <span class="size">@AMD_SIZE@ · xz</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@AMD_HASH@</div>
+  </div>
+
+  <div class="card">
+    <h3>arm64 가상머신 전용</h3>
+    <p class="for">UTM, UTM SE, QEMU. 압축을 풀고 더블클릭하면 됩니다. GPU 펌웨어가 없어
+       실기에서는 뜨지 않습니다.<br>
+       <span class="en-line">A ready-made UTM bundle. Will not boot on the board.</span></p>
+    <div class="row">
+      <a class="dl" href="dist/@UTM_NAME@">다운로드 / Download</a>
+      <span class="size">@UTM_SIZE@ · zip</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@UTM_HASH@</div>
+  </div>
+</div>
+
+<p class="muted" style="margin-top:18px;font-size:0.9rem">
+  체크섬 목록 / checksums: <a href="dist/SHA256SUMS.txt">SHA256SUMS.txt</a> ·
+  이 페이지가 안 열리면 저장소의 <a href="@REPO_URL@/tree/main/dist"><code>dist/</code></a>
+  폴더에서 그대로 받을 수 있습니다.
+</p>
+
+<h2>받은 뒤에<span class="en">After you download</span></h2>
+
+<p>먼저 파일이 온전한지 확인하세요. 받다가 끊긴 이미지는 부팅 도중에 이상하게 실패합니다.</p>
+<pre>sha256sum -c SHA256SUMS.txt</pre>
+
+<p><strong>SD카드에 굽기</strong> — <code>/dev/sdX</code>를 꼭 확인하세요.
+   여기서 재부팅으로 되돌릴 수 없는 실수는 이것 하나뿐입니다.</p>
+<pre>xz -d &lt; @PI_NAME@ | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
+
+<p>첫 부팅에서 <code>/data</code> 파티션이 카드 전체로 알아서 늘어납니다.</p>
+
+<p><strong>가상머신</strong> — 압축을 풀고 디스크로 붙인 뒤 <strong>UEFI 부팅</strong>으로
+   설정하세요. MBR 부트스트랩은 일부러 비워두었기 때문에 legacy BIOS로는 뜨지 않습니다.
+   이미지 파일을 <code>truncate -s 16G</code> 하면 디스크가 커지고, 파일은 sparse라
+   실제로 쓰는 만큼만 차지합니다.</p>
+
+<p><strong>SSH</strong> — 비밀번호 로그인은 아예 컴파일하지 않았습니다. 인터넷에 물린 보드에서
+   비밀번호는 시간 문제라, 선택지로 두지 않았습니다. 카드의 첫 번째 파티션은 FAT32라
+   윈도우·맥·리눅스 어디서나 열리니, 거기 <code>authorized_keys</code>에 공개키를 넣으세요.
+   사용자는 root 하나입니다.</p>
+<pre>cat ~/.ssh/id_ed25519.pub &gt;&gt; /media/BOOT/authorized_keys</pre>
+
+<h2>안에서 할 수 있는 것<span class="en">What you get once it boots</span></h2>
+
+<ul>
+  <li><strong>SSH 로 들어가기가 쉬워졌습니다.</strong> <code>authkey new</code> 하나면 기기에서 키를
+      만들고, 등록하고, 개인키를 가져갈 자리에 두고, 이 기계의 실제 주소가 들어간 접속
+      명령줄을 그대로 출력합니다. 비밀번호 인증은 여전히 컴파일하지 않았습니다.</li>
+  <li><strong>서버로 쓸 수 있습니다.</strong> <code>httpd</code> 로 디렉터리를 HTTP 로 서비스하고,
+      <code>service add httpd</code> 로 등록하면 init 이 지킵니다 — 죽으면 다시 뜨고, 재부팅해도
+      남고, 메모리가 모자라도 guard 가 죽이지 않습니다. 포트는 <code>firewall allow 8080</code> 으로
+      기기에서 바로 엽니다.</li>
+  <li><strong>데비안 패키지가 됩니다.</strong> <code>apt install ripgrep htop</code> — 진짜
+      데비안 apt입니다. 데비안 유저랜드가 <code>/data/debian</code>에 따로 들어가므로
+      시스템 이미지는 손대지 않고, <code>rm -rf /data/debian</code> 하면 전부 되돌아갑니다.
+      처음 한 번은 95MB를 받아 440MB로 풉니다.</li>
+  <li><strong>파이썬과 pip가 그대로 됩니다.</strong> CPython 3.12에 glibc가 같이 들어 있어서
+      numpy·pillow 같은 C 확장 휠도 설치됩니다. 일반 리눅스 바이너리도
+      <code>run</code>으로 돕니다 (arm64와 amd64 양쪽 다).</li>
+  <li><strong>USB 드라이브를 꽂으면 알아서 붙습니다.</strong> <code>/media/&lt;이름&gt;</code>에
+      마운트되고, 계속 쓸 드라이브는 <code>storage adopt</code>로 고정하면 재부팅을 넘겨
+      같은 자리에 있습니다. 장치 이름이 아니라 파일시스템 레이블로 찾기 때문에 포트를
+      바꿔 꽂아도 됩니다.</li>
+  <li><strong>혼자 안 죽게 만들어 두었습니다.</strong> <code>guard</code>가 메모리·온도·전압·
+      CPU를 지켜보다가 포크 폭탄과 메모리 고갈을 정리하고, 워치독이 커널이 멈추면 보드를
+      재시작하고, 부팅 실패가 다섯 번 이어지면 사용자 스크립트를 건너뜁니다.</li>
+</ul>
+
+<h2 id="caveats">쓰기 전에 알아둘 것<span class="en">Before you rely on this</span></h2>
+
+<div class="warn">
+  <b>지원되는 제품이 아니라 취미로 만든 운영체제입니다.</b>
+  보안팀도, CVE 절차도, 대기하는 사람도 없습니다.
+  계속 돌아가야만 하는 일에는 Raspberry Pi OS Lite나 데비안을 쓰세요.
+</div>
+
+<ul>
+  <li><strong>사람이 아니라 Claude Code가 썼습니다.</strong> 설계와 디버깅 과정이 커밋 기록과
+      주석에 전부 남아 있지만, 독립적인 엔지니어의 검토를 받은 적이 없고 실제 운영에 쓰인
+      적도 없습니다.</li>
+  <li><strong>실기기 검증이 아직입니다.</strong> 전부 QEMU에서 시험했습니다. 라즈베리파이
+      실물에서의 WiFi, 온도 센서, 하드웨어 워치독, 실제 SD카드에서의 EMMC 드라이버는
+      확인하지 못했습니다.</li>
+  <li><strong>보안 부분은 외부 감사를 받지 않았습니다.</strong> 업데이트 서명 검증, 방화벽,
+      DNS·NTP 위조 방지가 구현돼 있고 근거도 주석에 적혀 있지만, 다른 사람이 검토한 적은
+      없습니다. 이것만 믿고 적대적인 망에 바로 올리지 마세요.</li>
+  <li><strong>재부팅을 넘겨 남는 곳은 <code>/data</code> 하나</strong>이고, 그건 카드 한 장의
+      파티션 하나입니다. 카드는 죽습니다. 아까운 것은 따로 받아두세요.</li>
+  <li><strong>GUI가 없고 컨테이너를 돌리지 않습니다.</strong> DRM 드라이버는 커널에 있지만
+      X11/Wayland는 직접 올려야 하고, cgroup·네임스페이스는 컨테이너 용도로 켜두지
+      않았습니다.</li>
+  <li><strong>거친 구석이 남아 있고, 대개 조용한 쪽입니다.</strong> 최근 사례:
+      <code>echo x | grep x</code> 가 셸이 존재한 내내 "command not found" 였고,
+      <code>cmd ; echo $?</code> 는 항상 0이었고, <code>127.0.0.1</code> 은 루프백 인터페이스가
+      올라오지 않아 통하지 않았습니다. 전부 고쳤고 각각 셀프테스트에 검사가 생겼지만,
+      이런 것이 더 나올 거라고 보시는 편이 맞습니다.</li>
+</ul>
+
+<p class="muted"><strong>확인된 것:</strong> 두 아키텍처 모두 QEMU 실제 부팅에서 프로젝트
+   셀프테스트를 실패 없이 통과합니다 — 부팅, 저장소, SSH, 파이썬, 외부 바이너리, 그래픽,
+   보안, 오류 경로, 리다이렉션, 로깅, 시간, 새 명령어들, 셸 문법까지. 따로: 포크 폭탄이 한
+   번의 패스로 정리되고 init·SSH·로그가 살아 있으며, 메모리 고갈은 원인이 된 프로세스만
+   죽이고, <code>apt</code> 가 데비안 패키지를 받아 설치하고 실행합니다.</p>
+
+<h2>소스<span class="en">Source</span></h2>
+<p>전부 공개되어 있습니다 — <a href="@REPO_URL@">@REPO_SHORT@</a>.
+   사용법과 빌드 방법은 <code>GUIDE/USAGE.txt</code>에, 어느 브랜치에 무엇이 있는지는
+   <code>GUIDE/BRANCHES.txt</code>에 한국어와 영어로 같이 있습니다. 라이선스는 MIT입니다.</p>
+
+
+<div class="lang">
+<h2>English</h2>
+
+<p>A small Linux distribution written from scratch — kernel configuration, C library, init, shell
+   and 130 commands, <strong>all of it written by <a href="https://claude.com/claude-code">Claude
+   Code</a></strong>, Anthropic's coding agent, working under the repository owner's direction.
+   No human wrote or reviewed this code. Please read the warnings below before trusting it with
+   anything.</p>
+
+<p>It started because a Raspberry Pi Zero 2 W has 512MB of RAM and Ubuntu spends half of it
+   before you have done anything. Nothing in it turned out to be specific to that board, so it
+   now runs on <strong>arm64 virtual machines and amd64 PCs</strong> as well. The whole system is
+   a single kernel image, 13–22MB, unpacked into RAM at boot — nothing on disk is part of the
+   running system, so pulling the power leaves nothing to corrupt.</p>
+
+<p><strong>Which image.</strong> The first is a Raspberry Pi Zero 2 W image that also runs in
+   arm64 virtual machines — it carries both an uncompressed kernel for the Pi's GPU and an EFI
+   executable for UEFI. The second is for ordinary PCs and desktop VMs. The third is a ready-made
+   UTM bundle for arm64 VMs only, and will not boot on the board.</p>
+
+<p><strong>Check what you downloaded</strong> with <code>sha256sum -c SHA256SUMS.txt</code>; a
+   truncated image fails in confusing ways halfway through boot. Burn a card with
+   <code>xz -d &lt; image.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync</code>, checking
+   <code>/dev/sdX</code> twice — that is the one mistake here a reboot cannot undo. In a VM, set
+   UEFI boot; the MBR bootstrap is empty on purpose.</p>
+
+<p><strong>SSH has no passwords.</strong> Password authentication is not compiled in — on a board
+   facing the internet a password is a matter of time, so it was not offered as an option. Put
+   your public key in <code>authorized_keys</code> on the card's first partition, which is FAT32
+   and opens on any PC. There is one user, root.</p>
+
+<p><strong>Once it boots</strong> you get sed, awk, grep and diff over one shared regular
+   expression engine; real Debian packages through <code>apt install</code>, into a separate tree
+   under <code>/data/debian</code> so removing it undoes everything; CPython 3.12 with pip and
+   working manylinux wheels; USB drives that mount themselves and can be pinned across reboots by
+   filesystem label; <code>httpd</code> to serve a directory, supervised by init once you
+   <code>service add</code> it; <code>firewall allow 8080</code> to open a port without a card
+   reader; and <code>authkey new</code>, which makes a key on the machine and prints the exact
+   ssh command to get in with.</p>
+
+<div class="warn">
+  <b>This is a hobby operating system, not a supported product.</b>
+  No security team, no CVE process, nobody on call. Real Pi hardware is not verified — everything
+  was tested in QEMU, so WiFi, the thermal sensors, the hardware watchdog and the EMMC driver
+  against a real card are all unconfirmed. The security work has not been audited by anyone. For
+  anything that has to keep working, use Raspberry Pi OS Lite or Debian.
+</div>
+
+<p>What is verified: both architectures pass the project's self-test with nothing failing, on
+   real QEMU boots. Separately: a fork bomb is cleared in one sweep with init, SSH and the log
+   still running; memory exhaustion kills the process that caused it and nothing else; and apt
+   fetches, installs and runs a Debian package. Full source, documented in English and Korean,
+   at
+   <a href="@REPO_URL@">@REPO_SHORT@</a>. MIT licensed.</p>
+</div>
+
+<footer>
+  이미지 빌드: @BUILD_DATE@ · 이 페이지의 크기와 체크섬은 실제 파일에서 만들어집니다<br>
+  <span class="muted">Images built @BUILD_DATE@ · the sizes and checksums on this page are read
+  from the files themselves, so they cannot drift</span>
+</footer>
+
+</div>
+</body>
+</html>

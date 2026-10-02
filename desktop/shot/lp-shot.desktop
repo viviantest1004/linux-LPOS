@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Screenshot
+Name[ko]=스크린샷
+GenericName=Screen Capture
+GenericName[ko]=화면 캡처
+Comment=Capture the screen, an area or a window
+Comment[ko]=화면 전체나 영역, 창을 찍습니다
+Exec=lp-shot
+Icon=applets-screenshooter
+Terminal=false
+Categories=Graphics;Utility;GTK;
+Keywords=screenshot;capture;screen;snip;print;
+Keywords[ko]=스크린샷;캡처;화면;갈무리;
+StartupNotify=true
+StartupWMClass=org.lpzero.Screenshot

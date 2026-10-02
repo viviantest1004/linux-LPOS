@@ -1,0 +1,32 @@
+# 70_lp-shell.gschema.override - the icon theme, the base theme and the
+# dark preference, as every GTK application on Wayland reads them.
+#
+# The same story as 60_lp-fonts: on Wayland GTK 3 and GTK 4 take these
+# from GSettings (org.gnome.desktop.interface), and the schema default
+# outranks ~/.config/gtk-*/settings.ini. With only settings.ini naming an
+# icon theme the dock and every app came up in "Adwaita", which has no
+# icon for gnote, geany, thunderbird or lp-tasks - the dock drew four
+# broken-image placeholders. LP draws every icon the dock and the app
+# grid ask for and inherits Papirus-Dark, then Adwaita, for the rest.
+#
+# A person's own choice, written to dconf by Settings, still wins.
+
+[org.gnome.desktop.interface]
+icon-theme='LP'
+gtk-theme='Adwaita'
+color-scheme='prefer-dark'
+cursor-theme='Adwaita'
+
+# Minimise, maximise and close on the right of every header bar. Under
+# sway, which cannot minimise, lp-shell-start takes minimise out again
+# for that session.
+[org.gnome.desktop.wm.preferences]
+button-layout='appmenu:minimize,maximize,close'
+
+# gedit 43 keeps its light "tango" scheme under a dark theme: the current
+# line and the gutter came out near white behind white text, and the line
+# being typed on could not be read. oblivion is its dark scheme. (Under
+# the light style the editor then stays dark; gedit here has no scheme
+# that follows the style by itself.)
+[org.gnome.gedit.preferences.editor]
+scheme='oblivion'

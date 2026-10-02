@@ -1,0 +1,916 @@
+--- a/include/sway/tree/container.h
++++ b/include/sway/tree/container.h
+@@ -3,6 +3,7 @@
+ #include <stdint.h>
+ #include <sys/types.h>
+ #include <wlr/types/wlr_surface.h>
++#include <wlr/util/box.h>
+ #include "list.h"
+ #include "sway/tree/node.h"
+ 
+@@ -113,6 +114,30 @@
+ 	// Hidden scratchpad containers have a NULL parent.
+ 	bool scratchpad;
+ 
++	// LP: maximize and minimize. Stock sway 1.7 ignores both requests; LP's
++	// session floats every window, so the buttons on the windows' own title
++	// bars and the dock's minimize would otherwise do nothing.
++	//
++	// A maximized container is a floating container fitted to its output's
++	// usable area (the output minus layer-shell exclusive zones), and
++	// arrange_workspace keeps it fitted when that area changes.
++	// maximize_restore is the floating geometry to return to, with x and y
++	// relative to the output's origin so that it still fits if the window
++	// changes output while maximized.
++	bool maximized;
++	struct wlr_fbox maximize_restore;
++
++	// A minimized container is hidden in the scratchpad. minimize_restore
++	// holds its floating geometry, x and y relative to its output's origin,
++	// so it comes back where it was rather than in the scratchpad's centred
++	// default place. minimized_tiled and minimized_scratchpad record what it
++	// was before, so that restoring it gives back a tiled window or a
++	// scratchpad window rather than a new kind of window.
++	bool minimized;
++	bool minimized_tiled;
++	bool minimized_scratchpad;
++	struct wlr_fbox minimize_restore;
++
+ 	float alpha;
+ 
+ 	struct wlr_texture *title_focused;
+@@ -246,6 +271,26 @@
+  */
+ void container_floating_move_to_center(struct sway_container *con);
+ 
++/**
++ * LP: maximize or unmaximize a floating container (see `maximized` above).
++ * Tells the client and the foreign-toplevel handle. Containers that are not
++ * floating are left alone. The caller arranges and commits.
++ */
++void container_floating_set_maximized(struct sway_container *con,
++		bool maximized);
++
++/**
++ * LP: drop the maximized state of a container that the user is moving or
++ * resizing by other means, keeping its current geometry.
++ */
++void container_floating_forget_maximized(struct sway_container *con);
++
++/**
++ * LP: fit a maximized floating container to its output's usable area.
++ * Called by arrange_workspace; does nothing to other containers.
++ */
++void container_floating_fit_maximized(struct sway_container *con);
++
+ bool container_has_urgent_child(struct sway_container *container);
+ 
+ /**
+--- a/include/sway/tree/root.h
++++ b/include/sway/tree/root.h
+@@ -68,6 +68,25 @@
+  */
+ void root_scratchpad_hide(struct sway_container *con);
+ 
++/**
++ * LP: minimize a window: hide it in the scratchpad, remembering where it
++ * was, move the focus on if it had it, and mark it minimized for the client
++ * and the foreign-toplevel handle.
++ */
++void root_minimize_container(struct sway_container *con);
++
++/**
++ * LP: bring a minimized window back on the focused workspace, where it was
++ * on its output, as the kind of window it was before, focused and raised.
++ */
++void root_unminimize_container(struct sway_container *con);
++
++/**
++ * LP: forget that a container is minimized (it is being shown or destroyed
++ * by other means). Clears the client's and the foreign-toplevel state.
++ */
++void root_clear_minimized(struct sway_container *con);
++
+ struct sway_workspace *root_workspace_for_pid(pid_t pid);
+ 
+ void root_record_workspace_pid(pid_t pid);
+--- a/include/sway/tree/view.h
++++ b/include/sway/tree/view.h
+@@ -43,6 +43,8 @@
+ 	void (*set_activated)(struct sway_view *view, bool activated);
+ 	void (*set_tiled)(struct sway_view *view, bool tiled);
+ 	void (*set_fullscreen)(struct sway_view *view, bool fullscreen);
++	void (*set_maximized)(struct sway_view *view, bool maximized); // LP
++	void (*set_minimized)(struct sway_view *view, bool minimized); // LP
+ 	void (*set_resizing)(struct sway_view *view, bool resizing);
+ 	bool (*wants_floating)(struct sway_view *view);
+ 	void (*for_each_surface)(struct sway_view *view,
+@@ -101,6 +103,8 @@
+ 	struct wl_listener foreign_activate_request;
+ 	struct wl_listener foreign_fullscreen_request;
+ 	struct wl_listener foreign_close_request;
++	struct wl_listener foreign_maximize_request; // LP
++	struct wl_listener foreign_minimize_request; // LP
+ 	struct wl_listener foreign_destroy;
+ 
+ 	bool destroying;
+@@ -132,6 +136,8 @@
+ 	struct wl_listener request_move;
+ 	struct wl_listener request_resize;
+ 	struct wl_listener request_fullscreen;
++	struct wl_listener request_maximize; // LP
++	struct wl_listener request_minimize; // LP
+ 	struct wl_listener set_title;
+ 	struct wl_listener set_app_id;
+ 	struct wl_listener new_popup;
+@@ -282,6 +288,14 @@
+ 
+ void view_set_tiled(struct sway_view *view, bool tiled);
+ 
++/**
++ * LP: tell the client and the foreign-toplevel handle whether the view is
++ * maximized / minimized. Only the state: geometry is the container's job.
++ */
++void view_set_maximized(struct sway_view *view, bool maximized);
++
++void view_set_minimized(struct sway_view *view, bool minimized);
++
+ void view_close(struct sway_view *view);
+ 
+ void view_close_popups(struct sway_view *view);
+--- a/sway/desktop/xdg_shell.c
++++ b/sway/desktop/xdg_shell.c
+@@ -15,6 +15,7 @@
+ #include "sway/output.h"
+ #include "sway/tree/arrange.h"
+ #include "sway/tree/container.h"
++#include "sway/tree/root.h"
+ #include "sway/tree/view.h"
+ #include "sway/tree/workspace.h"
+ #include "sway/xdg_decoration.h"
+@@ -182,6 +183,13 @@
+ 	wlr_xdg_toplevel_set_fullscreen(surface, fullscreen);
+ }
+ 
++static void set_maximized(struct sway_view *view, bool maximized) {
++	if (xdg_shell_view_from_view(view) == NULL) {
++		return;
++	}
++	wlr_xdg_toplevel_set_maximized(view->wlr_xdg_surface, maximized);
++}
++
+ static void set_resizing(struct sway_view *view, bool resizing) {
+ 	if (xdg_shell_view_from_view(view) == NULL) {
+ 		return;
+@@ -266,6 +274,7 @@
+ 	.set_activated = set_activated,
+ 	.set_tiled = set_tiled,
+ 	.set_fullscreen = set_fullscreen,
++	.set_maximized = set_maximized,
+ 	.set_resizing = set_resizing,
+ 	.wants_floating = wants_floating,
+ 	.for_each_surface = for_each_surface,
+@@ -371,6 +380,39 @@
+ 	transaction_commit_dirty();
+ }
+ 
++// LP: the maximize and minimize buttons on a window's own title bar.
++static void handle_request_maximize(struct wl_listener *listener, void *data) {
++	struct sway_xdg_shell_view *xdg_shell_view =
++		wl_container_of(listener, xdg_shell_view, request_maximize);
++	struct sway_view *view = &xdg_shell_view->view;
++	struct wlr_xdg_surface *xdg_surface = view->wlr_xdg_surface;
++	if (!xdg_surface->mapped) {
++		wlr_xdg_surface_schedule_configure(xdg_surface);
++		return;
++	}
++	struct sway_container *con = view->container;
++	container_floating_set_maximized(con,
++			xdg_surface->toplevel->requested.maximized);
++	if (con->pending.workspace) {
++		arrange_workspace(con->pending.workspace);
++	}
++	transaction_commit_dirty();
++}
++
++static void handle_request_minimize(struct wl_listener *listener, void *data) {
++	struct sway_xdg_shell_view *xdg_shell_view =
++		wl_container_of(listener, xdg_shell_view, request_minimize);
++	struct sway_view *view = &xdg_shell_view->view;
++	struct wlr_xdg_surface *xdg_surface = view->wlr_xdg_surface;
++	if (!xdg_surface->mapped) {
++		return;
++	}
++	if (xdg_surface->toplevel->requested.minimized) {
++		root_minimize_container(view->container);
++		transaction_commit_dirty();
++	}
++}
++
+ static void handle_request_move(struct wl_listener *listener, void *data) {
+ 	struct sway_xdg_shell_view *xdg_shell_view =
+ 		wl_container_of(listener, xdg_shell_view, request_move);
+@@ -413,6 +455,8 @@
+ 	wl_list_remove(&xdg_shell_view->commit.link);
+ 	wl_list_remove(&xdg_shell_view->new_popup.link);
+ 	wl_list_remove(&xdg_shell_view->request_fullscreen.link);
++	wl_list_remove(&xdg_shell_view->request_maximize.link);
++	wl_list_remove(&xdg_shell_view->request_minimize.link);
+ 	wl_list_remove(&xdg_shell_view->request_move.link);
+ 	wl_list_remove(&xdg_shell_view->request_resize.link);
+ 	wl_list_remove(&xdg_shell_view->set_title.link);
+@@ -450,6 +494,15 @@
+ 		xdg_surface->toplevel->requested.fullscreen_output,
+ 		csd);
+ 
++	// LP: a window that asks to open maximized (LibreOffice, when it was
++	// maximized last time) is, once the session's rules have floated it.
++	if (xdg_surface->toplevel->requested.maximized &&
++			!xdg_surface->toplevel->requested.fullscreen &&
++			container_is_floating(view->container)) {
++		container_floating_set_maximized(view->container, true);
++		arrange_workspace(view->container->pending.workspace);
++	}
++
+ 	transaction_commit_dirty();
+ 
+ 	xdg_shell_view->commit.notify = handle_commit;
+@@ -464,6 +517,14 @@
+ 	wl_signal_add(&xdg_surface->toplevel->events.request_fullscreen,
+ 			&xdg_shell_view->request_fullscreen);
+ 
++	xdg_shell_view->request_maximize.notify = handle_request_maximize;
++	wl_signal_add(&xdg_surface->toplevel->events.request_maximize,
++			&xdg_shell_view->request_maximize);
++
++	xdg_shell_view->request_minimize.notify = handle_request_minimize;
++	wl_signal_add(&xdg_surface->toplevel->events.request_minimize,
++			&xdg_shell_view->request_minimize);
++
+ 	xdg_shell_view->request_move.notify = handle_request_move;
+ 	wl_signal_add(&xdg_surface->toplevel->events.request_move,
+ 			&xdg_shell_view->request_move);
+--- a/sway/desktop/xwayland.c
++++ b/sway/desktop/xwayland.c
+@@ -15,6 +15,7 @@
+ #include "sway/output.h"
+ #include "sway/tree/arrange.h"
+ #include "sway/tree/container.h"
++#include "sway/tree/root.h"
+ #include "sway/tree/view.h"
+ #include "sway/tree/workspace.h"
+ 
+@@ -265,6 +266,20 @@
+ 	wlr_xwayland_surface_set_maximized(surface, tiled);
+ }
+ 
++static void set_maximized(struct sway_view *view, bool maximized) {
++	if (xwayland_view_from_view(view) == NULL) {
++		return;
++	}
++	wlr_xwayland_surface_set_maximized(view->wlr_xwayland_surface, maximized);
++}
++
++static void set_minimized(struct sway_view *view, bool minimized) {
++	if (xwayland_view_from_view(view) == NULL) {
++		return;
++	}
++	wlr_xwayland_surface_set_minimized(view->wlr_xwayland_surface, minimized);
++}
++
+ static void set_fullscreen(struct sway_view *view, bool fullscreen) {
+ 	if (xwayland_view_from_view(view) == NULL) {
+ 		return;
+@@ -372,6 +387,8 @@
+ 	.set_activated = set_activated,
+ 	.set_tiled = set_tiled,
+ 	.set_fullscreen = set_fullscreen,
++	.set_maximized = set_maximized,
++	.set_minimized = set_minimized,
+ 	.wants_floating = wants_floating,
+ 	.is_transient_for = is_transient_for,
+ 	.close = _close,
+@@ -442,6 +459,7 @@
+ 	wl_list_remove(&xwayland_view->request_configure.link);
+ 	wl_list_remove(&xwayland_view->request_fullscreen.link);
+ 	wl_list_remove(&xwayland_view->request_minimize.link);
++	wl_list_remove(&xwayland_view->request_maximize.link);
+ 	wl_list_remove(&xwayland_view->request_move.link);
+ 	wl_list_remove(&xwayland_view->request_resize.link);
+ 	wl_list_remove(&xwayland_view->request_activate.link);
+@@ -563,10 +581,31 @@
+ 		return;
+ 	}
+ 
++	// LP: minimize really hides the window (see root_minimize_container).
+ 	struct wlr_xwayland_minimize_event *e = data;
+-	struct sway_seat *seat = input_manager_current_seat();
+-	bool focused = seat_get_focus(seat) == &view->container->node;
+-	wlr_xwayland_surface_set_minimized(xsurface, !focused && e->minimize);
++	if (e->minimize) {
++		root_minimize_container(view->container);
++	} else {
++		root_unminimize_container(view->container);
++	}
++	transaction_commit_dirty();
++}
++
++static void handle_request_maximize(struct wl_listener *listener, void *data) {
++	struct sway_xwayland_view *xwayland_view =
++		wl_container_of(listener, xwayland_view, request_maximize);
++	struct sway_view *view = &xwayland_view->view;
++	struct wlr_xwayland_surface *xsurface = view->wlr_xwayland_surface;
++	if (!xsurface->mapped) {
++		return;
++	}
++	struct sway_container *con = view->container;
++	container_floating_set_maximized(con,
++			xsurface->maximized_vert && xsurface->maximized_horz);
++	if (con->pending.workspace) {
++		arrange_workspace(con->pending.workspace);
++	}
++	transaction_commit_dirty();
+ }
+ 
+ static void handle_request_move(struct wl_listener *listener, void *data) {
+@@ -710,6 +749,10 @@
+ 		&xwayland_view->request_minimize);
+ 	xwayland_view->request_minimize.notify = handle_request_minimize;
+ 
++	wl_signal_add(&xsurface->events.request_maximize,
++		&xwayland_view->request_maximize);
++	xwayland_view->request_maximize.notify = handle_request_maximize;
++
+ 	wl_signal_add(&xsurface->events.request_activate,
+ 		&xwayland_view->request_activate);
+ 	xwayland_view->request_activate.notify = handle_request_activate;
+--- a/sway/input/seatop_move_floating.c
++++ b/sway/input/seatop_move_floating.c
+@@ -3,6 +3,7 @@
+ #include "sway/desktop.h"
+ #include "sway/desktop/transaction.h"
+ #include "sway/input/cursor.h"
++#include "sway/tree/arrange.h"
+ #include "sway/input/seat.h"
+ 
+ struct seatop_move_floating_event {
+@@ -64,6 +65,22 @@
+ 	seatop_end(seat);
+ 
+ 	struct sway_cursor *cursor = seat->cursor;
++
++	// LP: dragging a maximized window by its title bar restores its size
++	// first, under the pointer at the same place across its width.
++	if (con->maximized) {
++		double cx = cursor->cursor->x, cy = cursor->cursor->y;
++		double frac = con->pending.width > 0 ?
++			(cx - con->pending.x) / con->pending.width : 0.5;
++		double top = cy - con->pending.y;
++		container_floating_set_maximized(con, false);
++		con->pending.x = cx - frac * con->pending.width;
++		con->pending.y = cy - top;
++		if (con->pending.workspace) {
++			arrange_workspace(con->pending.workspace);
++		}
++	}
++
+ 	struct seatop_move_floating_event *e =
+ 		calloc(1, sizeof(struct seatop_move_floating_event));
+ 	if (!e) {
+--- a/sway/input/seatop_resize_floating.c
++++ b/sway/input/seatop_resize_floating.c
+@@ -6,6 +6,7 @@
+ #include "sway/input/cursor.h"
+ #include "sway/input/seat.h"
+ #include "sway/tree/arrange.h"
++#include "sway/tree/root.h"
+ #include "sway/tree/view.h"
+ #include "sway/tree/workspace.h"
+ #include "sway/tree/container.h"
+@@ -161,6 +162,7 @@
+ 
+ void seatop_begin_resize_floating(struct sway_seat *seat,
+ 		struct sway_container *con, enum wlr_edges edge) {
++	container_floating_forget_maximized(con); // LP
+ 	seatop_end(seat);
+ 
+ 	struct seatop_resize_floating_event *e =
+--- a/sway/tree/arrange.c
++++ b/sway/tree/arrange.c
+@@ -288,6 +288,11 @@
+ 		}
+ 	}
+ 
++	// LP: maximized windows follow the usable area.
++	for (int i = 0; i < workspace->floating->length; ++i) {
++		container_floating_fit_maximized(workspace->floating->items[i]);
++	}
++
+ 	workspace_add_gaps(workspace);
+ 	node_set_dirty(&workspace->node);
+ 	sway_log(SWAY_DEBUG, "Arranging workspace '%s' at %f, %f", workspace->name,
+--- a/sway/tree/container.c
++++ b/sway/tree/container.c
+@@ -751,6 +751,25 @@
+ 	}
+ 
+ 	floating_natural_resize(con);
++	if (con->view) {
++		// LP: never bigger than the usable area (the output minus the top
++		// bar and the dock). A window that asked for the whole output was
++		// centred on the output, its title bar under the top bar.
++		double extra_w = con->pending.width - con->pending.content_width;
++		double extra_h = con->pending.height - con->pending.content_height;
++		bool clamped = false;
++		if (con->pending.width > ws->width) {
++			con->pending.content_width = fmax(ws->width - extra_w, 1);
++			clamped = true;
++		}
++		if (con->pending.height > ws->height) {
++			con->pending.content_height = fmax(ws->height - extra_h, 1);
++			clamped = true;
++		}
++		if (clamped) {
++			container_set_geometry_from_content(con);
++		}
++	}
+ 	if (!con->view) {
+ 		if (con->pending.width > ws->width || con->pending.height > ws->height) {
+ 			con->pending.x = ob->x + (ob->width - con->pending.width) / 2;
+@@ -828,6 +847,9 @@
+ 	if (container_is_floating(container) == enable) {
+ 		return;
+ 	}
++	if (!enable) {
++		container_floating_forget_maximized(container); // LP
++	}
+ 
+ 	struct sway_seat *seat = input_manager_current_seat();
+ 	struct sway_workspace *workspace = container->pending.workspace;
+@@ -1819,3 +1841,83 @@
+ 	}
+ 	return change;
+ }
++
++// ── LP: maximize ───────────────────────────────────────────────────────
++//
++// LP floats every window, and stock sway ignores a window's request to be
++// maximized, so the maximize button on every title bar did nothing. A
++// maximized container here is a floating container fitted to its output's
++// usable area - the output minus the layer-shell exclusive zones of the top
++// bar and the dock - and arrange_workspace keeps it fitted when that area
++// changes (the dock gives its room back while a window is maximized).
++
++void container_floating_fit_maximized(struct sway_container *con) {
++	if (!con->maximized || !con->view || !container_is_floating(con) ||
++			con->pending.fullscreen_mode != FULLSCREEN_NONE) {
++		return;
++	}
++	struct sway_workspace *ws = con->pending.workspace;
++	if (!ws || !ws->output) {
++		return;
++	}
++	struct sway_output *output = ws->output;
++	struct wlr_box *area = &output->usable_area;
++	if (area->width <= 0 || area->height <= 0) {
++		return;
++	}
++	con->pending.x = output->lx + area->x;
++	con->pending.y = output->ly + area->y;
++	con->pending.width = area->width;
++	con->pending.height = area->height;
++	node_set_dirty(&con->node);
++}
++
++void container_floating_set_maximized(struct sway_container *con,
++		bool maximized) {
++	if (!con->view) {
++		return;
++	}
++	if (!container_is_floating(con) || con->maximized == maximized) {
++		// Nothing changes, but the client asked and waits for an answer.
++		view_set_maximized(con->view, con->maximized);
++		return;
++	}
++	struct sway_workspace *ws = con->pending.workspace;
++	struct sway_output *output = ws ? ws->output : NULL;
++	if (maximized) {
++		if (!output) {
++			view_set_maximized(con->view, false);
++			return;
++		}
++		con->maximize_restore.x = con->pending.x - output->lx;
++		con->maximize_restore.y = con->pending.y - output->ly;
++		con->maximize_restore.width = con->pending.width;
++		con->maximize_restore.height = con->pending.height;
++		con->maximized = true;
++		container_floating_fit_maximized(con);
++	} else {
++		con->maximized = false;
++		if (output && con->maximize_restore.width > 0 &&
++				con->maximize_restore.height > 0) {
++			con->pending.x = output->lx + con->maximize_restore.x;
++			con->pending.y = output->ly + con->maximize_restore.y;
++			con->pending.width = con->maximize_restore.width;
++			con->pending.height = con->maximize_restore.height;
++		} else if (ws) {
++			container_floating_set_default_size(con);
++			container_floating_move_to_center(con);
++		}
++		node_set_dirty(&con->node);
++	}
++	view_set_maximized(con->view, con->maximized);
++}
++
++void container_floating_forget_maximized(struct sway_container *con) {
++	if (!con->maximized) {
++		return;
++	}
++	con->maximized = false;
++	if (con->view) {
++		view_set_maximized(con->view, false);
++	}
++}
+--- a/sway/tree/root.c
++++ b/sway/tree/root.c
+@@ -111,6 +111,7 @@
+ }
+ 
+ void root_scratchpad_show(struct sway_container *con) {
++	root_clear_minimized(con); // LP: shown by `scratchpad show`, say
+ 	struct sway_seat *seat = input_manager_current_seat();
+ 	struct sway_workspace *new_ws = seat_get_focused_workspace(seat);
+ 	if (!new_ws) {
+@@ -183,6 +184,83 @@
+ 	ipc_event_window(con, "move");
+ }
+ 
++// ── LP: minimize ───────────────────────────────────────────────────────
++//
++// A minimized window is hidden in the scratchpad, where sway keeps windows
++// that are open but not on any workspace; its foreign-toplevel handle stays,
++// so the dock still shows it and can bring it back. It comes back where it
++// was on its output, not in the scratchpad's centred default place, and as
++// the kind of window it was - it does not stay a scratchpad window that the
++// next `scratchpad show` would take away again.
++
++void root_clear_minimized(struct sway_container *con) {
++	if (!con->minimized) {
++		return;
++	}
++	con->minimized = false;
++	if (con->view) {
++		view_set_minimized(con->view, false);
++	}
++}
++
++void root_minimize_container(struct sway_container *con) {
++	if (!con || !con->view || con->minimized) {
++		return;
++	}
++	struct sway_workspace *ws = con->pending.workspace;
++	if (!ws || !ws->output) {
++		return; // already hidden
++	}
++	struct sway_output *output = ws->output;
++	con->minimize_restore.x = con->pending.x - output->lx;
++	con->minimize_restore.y = con->pending.y - output->ly;
++	con->minimize_restore.width = con->pending.width;
++	con->minimize_restore.height = con->pending.height;
++	con->minimized_tiled = !container_is_floating(con);
++	con->minimized_scratchpad = con->scratchpad;
++	if (con->scratchpad) {
++		root_scratchpad_hide(con);
++	} else {
++		root_scratchpad_add_container(con, NULL);
++	}
++	con->minimized = true;
++	view_set_minimized(con->view, true);
++}
++
++void root_unminimize_container(struct sway_container *con) {
++	if (!con || !con->minimized) {
++		return;
++	}
++	root_clear_minimized(con);
++	struct sway_seat *seat = input_manager_current_seat();
++	struct sway_workspace *ws = seat_get_focused_workspace(seat);
++	if (!ws || !ws->output) {
++		return;
++	}
++	if (con->scratchpad && !con->pending.workspace) {
++		if (con->minimize_restore.width > 0 && con->minimize_restore.height > 0) {
++			con->pending.x = ws->output->lx + con->minimize_restore.x;
++			con->pending.y = ws->output->ly + con->minimize_restore.y;
++			con->pending.width = con->minimize_restore.width;
++			con->pending.height = con->minimize_restore.height;
++		}
++		root_scratchpad_show(con);
++	}
++	if (con->scratchpad && !con->minimized_scratchpad) {
++		root_scratchpad_remove_container(con);
++	}
++	if (con->minimized_tiled && container_is_floating(con)) {
++		container_set_floating(con, false);
++	}
++	if (container_is_floating(con)) {
++		container_raise_floating(con);
++	}
++	if (con->pending.workspace) {
++		arrange_workspace(con->pending.workspace);
++	}
++	seat_set_focus_container(seat, con);
++}
++
+ struct pid_workspace {
+ 	pid_t pid;
+ 	char *workspace;
+--- a/sway/tree/view.c
++++ b/sway/tree/view.c
+@@ -420,6 +420,26 @@
+ 	}
+ }
+ 
++void view_set_maximized(struct sway_view *view, bool maximized) {
++	if (view->impl->set_maximized) {
++		view->impl->set_maximized(view, maximized);
++	}
++	if (view->foreign_toplevel) {
++		wlr_foreign_toplevel_handle_v1_set_maximized(
++				view->foreign_toplevel, maximized);
++	}
++}
++
++void view_set_minimized(struct sway_view *view, bool minimized) {
++	if (view->impl->set_minimized) {
++		view->impl->set_minimized(view, minimized);
++	}
++	if (view->foreign_toplevel) {
++		wlr_foreign_toplevel_handle_v1_set_minimized(
++				view->foreign_toplevel, minimized);
++	}
++}
++
+ void view_close(struct sway_view *view) {
+ 	if (view->impl->close) {
+ 		view->impl->close(view);
+@@ -636,7 +656,9 @@
+ 	struct sway_seat *seat;
+ 	wl_list_for_each(seat, &server.input->seats, link) {
+ 		if (seat->wlr_seat == event->seat) {
+-			if (container_is_scratchpad_hidden_or_child(view->container)) {
++			if (view->container->minimized) {
++				root_unminimize_container(view->container); // LP
++			} else if (container_is_scratchpad_hidden_or_child(view->container)) {
+ 				root_scratchpad_show(view->container);
+ 			}
+ 			seat_set_focus_container(seat, view->container);
+@@ -688,6 +710,36 @@
+ 	transaction_commit_dirty();
+ }
+ 
++// LP: the dock minimizes a window, and maximizes one, through these.
++static void handle_foreign_maximize_request(
++		struct wl_listener *listener, void *data) {
++	struct sway_view *view = wl_container_of(
++			listener, view, foreign_maximize_request);
++	struct wlr_foreign_toplevel_handle_v1_maximized_event *event = data;
++	struct sway_container *con = view->container;
++	if (con->minimized && event->maximized) {
++		root_unminimize_container(con);
++	}
++	container_floating_set_maximized(con, event->maximized);
++	if (con->pending.workspace) {
++		arrange_workspace(con->pending.workspace);
++	}
++	transaction_commit_dirty();
++}
++
++static void handle_foreign_minimize_request(
++		struct wl_listener *listener, void *data) {
++	struct sway_view *view = wl_container_of(
++			listener, view, foreign_minimize_request);
++	struct wlr_foreign_toplevel_handle_v1_minimized_event *event = data;
++	if (event->minimized) {
++		root_minimize_container(view->container);
++	} else {
++		root_unminimize_container(view->container);
++	}
++	transaction_commit_dirty();
++}
++
+ static void handle_foreign_close_request(
+ 		struct wl_listener *listener, void *data) {
+ 	struct sway_view *view = wl_container_of(
+@@ -703,6 +755,8 @@
+ 	wl_list_remove(&view->foreign_activate_request.link);
+ 	wl_list_remove(&view->foreign_fullscreen_request.link);
+ 	wl_list_remove(&view->foreign_close_request.link);
++	wl_list_remove(&view->foreign_maximize_request.link);
++	wl_list_remove(&view->foreign_minimize_request.link);
+ 	wl_list_remove(&view->foreign_destroy.link);
+ }
+ 
+@@ -764,6 +818,12 @@
+ 	view->foreign_close_request.notify = handle_foreign_close_request;
+ 	wl_signal_add(&view->foreign_toplevel->events.request_close,
+ 			&view->foreign_close_request);
++	view->foreign_maximize_request.notify = handle_foreign_maximize_request;
++	wl_signal_add(&view->foreign_toplevel->events.request_maximize,
++			&view->foreign_maximize_request);
++	view->foreign_minimize_request.notify = handle_foreign_minimize_request;
++	wl_signal_add(&view->foreign_toplevel->events.request_minimize,
++			&view->foreign_minimize_request);
+ 	view->foreign_destroy.notify = handle_foreign_destroy;
+ 	wl_signal_add(&view->foreign_toplevel->events.destroy,
+ 			&view->foreign_destroy);
+--- a/sway/commands.c
++++ b/sway/commands.c
+@@ -120,6 +120,8 @@
+ 	{ "layout", cmd_layout },
+ 	{ "mark", cmd_mark },
+ 	{ "max_render_time", cmd_max_render_time },
++	{ "maximize", cmd_maximize }, // LP
++	{ "minimize", cmd_minimize }, // LP
+ 	{ "move", cmd_move },
+ 	{ "nop", cmd_nop },
+ 	{ "opacity", cmd_opacity },
+--- a/include/sway/commands.h
++++ b/include/sway/commands.h
+@@ -151,6 +151,8 @@
+ sway_cmd cmd_log_colors;
+ sway_cmd cmd_mark;
+ sway_cmd cmd_max_render_time;
++sway_cmd cmd_maximize; // LP
++sway_cmd cmd_minimize; // LP
+ sway_cmd cmd_mode;
+ sway_cmd cmd_mouse_warping;
+ sway_cmd cmd_move;
+--- a/sway/meson.build
++++ b/sway/meson.build
+@@ -70,6 +70,8 @@
+ 	'commands/kill.c',
+ 	'commands/mark.c',
+ 	'commands/max_render_time.c',
++	'commands/maximize.c',
++	'commands/minimize.c',
+ 	'commands/opacity.c',
+ 	'commands/include.c',
+ 	'commands/input.c',
+--- /dev/null
++++ b/sway/commands/maximize.c
+@@ -0,0 +1,30 @@
++#include <strings.h>
++#include "sway/commands.h"
++#include "sway/tree/arrange.h"
++#include "sway/tree/container.h"
++#include "util.h"
++
++// LP: maximize [enable|disable|toggle]
++//
++// What the maximize button on a window's own title bar does, from a key:
++// the window fills its output's usable area, and the same command puts it
++// back. Only floating windows are maximized this way - every window in
++// LP's session floats - so on a tiled one it does nothing, successfully.
++struct cmd_results *cmd_maximize(int argc, char **argv) {
++	struct cmd_results *error = NULL;
++	if ((error = checkarg(argc, "maximize", EXPECTED_AT_MOST, 1))) {
++		return error;
++	}
++	struct sway_container *con = config->handler_context.container;
++	if (!con || !con->view || !con->pending.workspace ||
++			!container_is_floating(con)) {
++		return cmd_results_new(CMD_SUCCESS, NULL);
++	}
++	bool enable = !con->maximized;
++	if (argc == 1) {
++		enable = parse_boolean(argv[0], con->maximized);
++	}
++	container_floating_set_maximized(con, enable);
++	arrange_workspace(con->pending.workspace);
++	return cmd_results_new(CMD_SUCCESS, NULL);
++}
+--- /dev/null
++++ b/sway/commands/minimize.c
+@@ -0,0 +1,20 @@
++#include "sway/commands.h"
++#include "sway/tree/container.h"
++#include "sway/tree/root.h"
++
++// LP: minimize
++//
++// What the minimize button on a window's own title bar does, from a key:
++// the window is hidden (in the scratchpad) and comes back from the dock.
++struct cmd_results *cmd_minimize(int argc, char **argv) {
++	struct cmd_results *error = NULL;
++	if ((error = checkarg(argc, "minimize", EXPECTED_EQUAL_TO, 0))) {
++		return error;
++	}
++	struct sway_container *con = config->handler_context.container;
++	if (!con || !con->view || !con->pending.workspace || con->minimized) {
++		return cmd_results_new(CMD_SUCCESS, NULL);
++	}
++	root_minimize_container(con);
++	return cmd_results_new(CMD_SUCCESS, NULL);
++}
+--- a/sway/input/text_input.c
++++ b/sway/input/text_input.c
+@@ -77,8 +77,14 @@
+ 	struct wlr_keyboard *active_keyboard = wlr_seat_get_keyboard(relay->seat->wlr_seat);
+ 	wlr_input_method_keyboard_grab_v2_set_keyboard(keyboard_grab,
+ 		active_keyboard);
+-	wlr_input_method_keyboard_grab_v2_send_modifiers(keyboard_grab,
+-		&active_keyboard->modifiers);
++	// LP: no keyboard is active for a moment after the input method and
++	// the focused window go away together; &NULL->modifiers was a segfault
++	// in wlroots (send_modifiers+0xf, address 0xfc) and the whole session
++	// went with it. set_keyboard already sends the modifiers of a real one.
++	if (active_keyboard) {
++		wlr_input_method_keyboard_grab_v2_send_modifiers(keyboard_grab,
++			&active_keyboard->modifiers);
++	}
+ 
+ 	wl_signal_add(&keyboard_grab->events.destroy,
+ 		&relay->input_method_keyboard_grab_destroy);
+--- a/sway/input/text_input.c
++++ b/sway/input/text_input.c
+@@ -254,7 +254,27 @@
+ 		return;
+ 	}
+ 
+-	sway_text_input_create(relay, wlr_text_input);
++	struct sway_text_input *text_input =
++		sway_text_input_create(relay, wlr_text_input);
++	if (!text_input) {
++		return;
++	}
++	// LP: GTK creates its text input when its first text field is
++	// realized - after its window already has the keyboard. Only a focus
++	// change sent enter, so the first field of a new window (Settings'
++	// search, a new folder's name) got no input method: Korean typed there
++	// went in as latin letters until focus moved away and back. Enter it
++	// now if its client already holds the keyboard focus.
++	struct wlr_surface *focused =
++		relay->seat->wlr_seat->keyboard_state.focused_surface;
++	if (focused && wl_resource_get_client(wlr_text_input->resource)
++			== wl_resource_get_client(focused->resource)) {
++		if (relay->input_method) {
++			wlr_text_input_v3_send_enter(wlr_text_input, focused);
++		} else {
++			text_input_set_pending_focused_surface(text_input, focused);
++		}
++	}
+ }
+ 
+ static void relay_handle_input_method(struct wl_listener *listener,
+--- a/sway/input/text_input.c
++++ b/sway/input/text_input.c
+@@ -26,11 +26,27 @@
+ 	return NULL;
+ }
+ 
++// LP: the input method's text goes to the focused text input that is also
++// enabled. A text input entered but never enabled (a GTK 3 window's, see
++// relay_handle_text_input) drops what it is sent: with the input method
++// still active from a field elsewhere, every key typed was lost.
++static struct sway_text_input *relay_get_enabled_text_input(
++		struct sway_input_method_relay *relay) {
++	struct sway_text_input *text_input = NULL;
++	wl_list_for_each(text_input, &relay->text_inputs, link) {
++		if (text_input->input->focused_surface &&
++				text_input->input->current_enabled) {
++			return text_input;
++		}
++	}
++	return NULL;
++}
++
+ static void handle_im_commit(struct wl_listener *listener, void *data) {
+ 	struct sway_input_method_relay *relay = wl_container_of(listener, relay,
+ 		input_method_commit);
+ 
+-	struct sway_text_input *text_input = relay_get_focused_text_input(relay);
++	struct sway_text_input *text_input = relay_get_enabled_text_input(relay);
+ 	if (!text_input) {
+ 		return;
+ 	}
+@@ -180,9 +196,18 @@
+ 		void *data) {
+ 	struct sway_text_input *text_input = wl_container_of(listener, text_input,
+ 		text_input_disable);
++	// LP: a window that closes loses its surface (wlroots clears
++	// focused_surface) before its text field sends disable, and returning
++	// here left the input method active and holding the keyboard, composing
++	// for a field that no longer existed. Deactivate then - unless another
++	// field is already focused and enabled: after an ordinary focus change
++	// set_focus has deactivated this one, and the input method now serves
++	// the new field.
+ 	if (text_input->input->focused_surface == NULL) {
+ 		sway_log(SWAY_DEBUG, "Disabling text input, but no longer focused");
+-		return;
++		if (relay_get_enabled_text_input(text_input->relay)) {
++			return;
++		}
+ 	}
+ 	relay_disable_text_input(text_input->relay, text_input);
+ }

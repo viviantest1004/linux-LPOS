@@ -1,0 +1,71 @@
+# config-armv6.txt - Pi Zero W 로 리눅스를 부팅할 때의 GPU 설정.
+#
+# tools/mksdcard.sh --linux (LP_ARCH=armv6) 가 이 파일을 config.txt 로
+# 복사한다. Zero 2 W 용 config-linux.txt 와는 별개다 - 두 보드는 CPU 가
+# 다르고, 그래서 커널도 디바이스 트리도 다르다.
+
+# ── 필수 ────────────────────────────────────────────────────────
+# arm_64bit 는 없다. BCM2835 의 ARM1176 은 32비트 전용이고, 이 줄을
+# 넣으면 GPU 가 64비트 커널을 찾다가 아무 말 없이 멈춘다.
+
+# 우리가 빌드한 커널. config.mk 의 LINUX_IMAGE_ARMV6 과 일치해야 한다.
+kernel=test_a_123_LPzeroW_linux.img
+
+# Zero W 용 디바이스 트리.
+# start.elf 가 이걸 읽어 메모리 크기·시리얼 번호 등을 패치한 뒤
+# 커널에 넘긴다.
+device_tree=bcm2708-rpi-zero-w.dtb
+
+# ── 시리얼 콘솔 ─────────────────────────────────────────────────
+enable_uart=1
+
+# ★ Zero 2 W 와 같은 이유로 필요하다. PL011(ttyAMA0)이 기본적으로
+# 블루투스에 물려 있고, 40핀 헤더에는 미니 UART(ttyS0)가 나온다.
+# 우리 커널은 8250 을 껐으므로 이 오버레이로 블루투스를 떼어내야
+# 헤더에서 콘솔이 보인다. 없으면 부팅은 되는데 화면이 캄캄하다.
+dtoverlay=disable-bt
+
+# ── USB ─────────────────────────────────────────────────────────
+# Zero W 에도 이더넷 포트가 없다. micro USB 하나로 대신한다.
+#   OTG 젠더 + USB 이더넷 어댑터  -> 호스트 모드 (진짜 랜선)
+#   PC 에 그냥 연결               -> 가젯 모드 (PC 와 USB 네트워크)
+# ★ "USB" 라고 인쇄된 포트에 꽂아야 한다. PWR IN 은 전원 전용이다.
+dtoverlay=dwc2,dr_mode=otg
+
+# ── HDMI ────────────────────────────────────────────────────────
+# hdmi_force_hotplug: drive the HDMI output even when the firmware
+# cannot read a monitor on it at power-on.
+#
+# Without this the Pi decides at boot whether anything is plugged in,
+# and if the answer is no it never turns the output on - so a monitor
+# switched on after the board, a cheap adapter or a passive HDMI switch
+# all produce a completely dark screen on a board that is running
+# perfectly. There is no way to tell that apart from a board that did
+# not boot, which is the worst kind of failure to hand somebody.
+#
+# The cost is that the output is driven with nothing attached, which on
+# this board is a few milliamps.
+hdmi_force_hotplug=1
+
+# If the screen is still dark, the sledgehammer is
+#
+#   hdmi_safe=1
+#
+# which forces 640x480 at maximum compatibility and ignores the
+# monitor's EDID entirely. It is ugly and it works on everything. Add
+# it here, on the FAT partition, from any PC.
+#
+# And to find out whether the GPU is driving the output at all, take
+# out disable_splash=1 below: the rainbow square is drawn by the
+# firmware before Linux starts, so seeing it means the HDMI path works
+# and the problem is later.
+
+# ── 부팅 시간 ───────────────────────────────────────────────────
+disable_splash=1
+boot_delay=0
+
+# ── 메모리 분할 ─────────────────────────────────────────────────
+# 이 보드는 512MB 를 CPU 와 GPU 가 나눠 쓴다. 32MB 면 1080p
+# 프레임버퍼(8.3MB)와 펌웨어 작업 공간이 들어가고, 나머지 480MB 가
+# 리눅스 몫이다. 3D 도 영상 디코딩도 쓰지 않으므로 더 줄 이유가 없다.
+gpu_mem=32

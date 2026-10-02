@@ -1,0 +1,19 @@
+# wpa-start - start the Wi-Fi service, for whatever still calls this.
+#
+# /etc/services used to run wpa_supplicant through this script so that
+# `touch /boot/wpa-debug` on the card could turn on its debug log. The
+# Wi-Fi is LP's own daemon now (`wpa`), and init starts it directly with
+# `wpa -d`: the debug switch, the choice of interface and the fallback to
+# wpa_supplicant all live in that program, where they work the same on
+# the desktop (whose interface is not called wlan0) and on a board.
+#
+# The fallback is a file, not an edit of this script:
+#     /boot/wpa-supplicant         on the card, from any PC
+#     sudo wifi fallback on        /etc/lp-net/fallback or /data/lp-net/fallback
+# With either present `wpa -d` execs wpa_supplicant on the wireless
+# interface with /etc/wpa.conf and the saved networks.
+#
+# This file stays because the lp-base package still installs it and a
+# hand-written service line may name it; it only hands over.
+
+exec wpa -d

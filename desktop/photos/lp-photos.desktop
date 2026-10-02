@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Photos
+Name[ko]=사진
+GenericName=Image Viewer
+GenericName[ko]=사진 보기
+Comment=View pictures and draw on them
+Comment[ko]=사진을 보고 그 위에 그리거나 자르고 보정합니다
+Exec=lp-photos %U
+Icon=multimedia-photo-viewer
+Terminal=false
+Categories=Graphics;Viewer;GTK;
+MimeType=image/png;image/jpeg;image/gif;image/webp;image/bmp;image/x-bmp;image/tiff;image/x-icon;image/vnd.microsoft.icon;image/svg+xml;
+Keywords=picture;photo;image;viewer;edit;draw;crop;
+Keywords[ko]=사진;그림;이미지;보기;편집;그리기;자르기;
+StartupNotify=true
+StartupWMClass=org.lpzero.Photos

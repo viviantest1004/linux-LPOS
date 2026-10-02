@@ -1,0 +1,176 @@
+#!/bin/sh
+# lp-time - the clock: what time it is, where, and how it is kept.
+#
+#   lp-time                      local and universal time, zone, automatic
+#                                time, how long the machine has been up
+#   lp-time uptime               how long since the machine started
+#   lp-time zones [TEXT]         the time zones, or those matching TEXT
+#   lp-time zone                 the zone in use
+#   lp-time zone set ZONE        use ZONE (Asia/Seoul, Europe/Berlin, UTC)
+#   lp-time set 'YYYY-MM-DD HH:MM[:SS]'
+#                                set the clock by hand (automatic time off)
+#   lp-time ntp [on|off]         automatic time from the network
+#   lp-time sync                 ask the network for the time now
+#
+# Changes need the administrator: sudo lp-time ...
+#
+# The machine's clock is kept by LP's own ntp daemon (userland/ntp): it
+# writes the time down every 30 seconds and sets it from the network every
+# hour. "ntp off" leaves /etc/lp/ntp-off, and the daemon then only writes
+# the time down - a clock set by hand stays where it was set.
+#
+# There is no systemd here, so Debian's timedatectl cannot work (it asks
+# systemd-timedated over D-Bus). /usr/local/bin/timedatectl is this
+# program answering in timedatectl's words, for Settings and for the
+# habits of anyone who has used another Linux.
+set -u
+
+ZI=/usr/share/zoneinfo
+NTP_OFF=/etc/lp/ntp-off
+DATE=date
+test -x /usr/bin/date && DATE=/usr/bin/date
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'lp-time: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    test "$(id -u)" = 0 || die "only the administrator can change the clock: sudo lp-time $*"
+}
+
+zone_now() {
+    if test -s /etc/timezone; then
+        read -r z < /etc/timezone
+        test -n "$z" && { say "$z"; return; }
+    fi
+    l=$(readlink /etc/localtime 2>/dev/null)
+    case $l in
+        *zoneinfo/*) say "${l#*zoneinfo/}" ;;
+        *) say UTC ;;
+    esac
+}
+
+ntp_on() { ! test -e "$NTP_OFF"; }
+
+up_words() {
+    read -r up _ < /proc/uptime
+    s=${up%.*}
+    d=$((s / 86400)); h=$((s % 86400 / 3600)); m=$((s % 3600 / 60))
+    if test $d -gt 0; then
+        say "$d days, $h h $m min"
+    else
+        say "$h h $m min"
+    fi
+}
+
+zones() {
+    {
+        if test -r "$ZI/tzdata.zi"; then
+            awk '$1 == "Z" || $1 == "Zone" { print $2 } $1 == "L" || $1 == "Link" { print $3 }' "$ZI/tzdata.zi"
+        elif test -r "$ZI/zone1970.tab"; then
+            awk '!/^#/ { print $3 }' "$ZI/zone1970.tab"
+        fi
+        echo UTC
+    } | grep '/' | grep -v '^Etc/\|^SystemV/\|^US/\|^posix/\|^right/' | sort -u
+    echo UTC
+}
+
+status() {
+    z=$(zone_now)
+    say "      Local time: $($DATE '+%a %Y-%m-%d %H:%M:%S %Z')"
+    say "  Universal time: $(TZ=UTC $DATE '+%a %Y-%m-%d %H:%M:%S UTC')"
+    say "       Time zone: $z ($($DATE '+%Z, %z'))"
+    if ntp_on; then
+        say "  Automatic time: on (from the network, every hour)"
+    else
+        say "  Automatic time: off (set by hand)"
+    fi
+    say "          Up for: $(up_words)"
+}
+
+set_zone() {
+    z=$1
+    case $z in */../*|../*|/*|"") die "not a time zone: $z" ;; esac
+    test -f "$ZI/$z" || die "no such time zone: $z (lp-time zones ${z##*/})"
+    need_root zone set "$z"
+    mkdir -p /etc/lp
+    ln -sfn "$ZI/$z" /etc/localtime || die "could not set /etc/localtime"
+    say "$z" > /etc/timezone
+    say "Time zone: $z ($($DATE '+%Z, %z'))"
+}
+
+set_clock() {
+    when=$1
+    need_root set "$when"
+    ntp_on && die "automatic time is on - turn it off first: sudo lp-time ntp off"
+    $DATE -s "$when" > /dev/null || die "could not set the clock to '$when'"
+    # The hardware clock too, so a restart keeps it.
+    if command -v hwclock > /dev/null 2>&1; then
+        hwclock -w > /dev/null 2>&1 || hwclock --systohc > /dev/null 2>&1 || true
+    fi
+    say "The clock now says $($DATE '+%Y-%m-%d %H:%M:%S %Z')"
+}
+
+set_ntp() {
+    case $1 in
+        on|yes|true|1)
+            need_root ntp on
+            rm -f "$NTP_OFF"
+            ( ntp > /dev/null 2>&1 & )
+            say "Automatic time: on" ;;
+        off|no|false|0)
+            need_root ntp off
+            mkdir -p /etc/lp
+            : > "$NTP_OFF"
+            say "Automatic time: off" ;;
+        *) die "ntp on or ntp off, not '$1'" ;;
+    esac
+}
+
+# ── timedatectl's words ──────────────────────────────────────────────
+timedatectl_main() {
+    cmd=${1:-status}
+    case $cmd in
+        status) status ;;
+        show)
+            say "Timezone=$(zone_now)"
+            say "LocalRTC=no"
+            say "CanNTP=yes"
+            if ntp_on; then say "NTP=yes"; else say "NTP=no"; fi
+            if ntp_on && test -e /data/.clock; then say "NTPSynchronized=yes"; else say "NTPSynchronized=no"; fi
+            say "TimeUSec=$($DATE '+%a %Y-%m-%d %H:%M:%S %Z')" ;;
+        list-timezones) zones ;;
+        set-timezone) test $# -ge 2 || die "set-timezone ZONE"; set_zone "$2" ;;
+        set-time) test $# -ge 2 || die "set-time 'YYYY-MM-DD HH:MM:SS'"; set_clock "$2" ;;
+        set-ntp) test $# -ge 2 || die "set-ntp true|false"; set_ntp "$2" ;;
+        -h|--help|help) say "timedatectl (LP): status | show | list-timezones | set-timezone ZONE | set-time TIME | set-ntp BOOL" ;;
+        *) die "timedatectl: unknown command '$cmd'" ;;
+    esac
+}
+
+case "${0##*/}" in
+    timedatectl) timedatectl_main "$@"; exit $? ;;
+esac
+
+cmd=${1:-status}
+case $cmd in
+    status) status ;;
+    uptime) up_words ;;
+    zones)
+        if test $# -ge 2; then zones | grep -i -- "$2"; else zones; fi ;;
+    zone)
+        if test $# -ge 3 && test "$2" = set; then set_zone "$3"
+        elif test $# -ge 2 && test "$2" != set; then set_zone "$2"
+        else zone_now; fi ;;
+    set)
+        test $# -ge 2 || die "set 'YYYY-MM-DD HH:MM[:SS]'"
+        shift; set_clock "$*" ;;
+    ntp)
+        if test $# -ge 2; then set_ntp "$2"
+        elif ntp_on; then say on; else say off; fi ;;
+    sync)
+        need_root sync
+        ntp || die "no time server answered" ;;
+    -h|--help|help)
+        sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$cmd' (lp-time --help)" ;;
+esac

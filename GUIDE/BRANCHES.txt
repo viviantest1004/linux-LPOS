@@ -1,0 +1,328 @@
+================================================================
+  linux-LP / LP-zero   -   WHAT IS ON WHICH BRANCH
+================================================================
+
+  English first, Korean second.
+  영어가 먼저 나오고, 한국어가 이어집니다.
+
+
+================================================================
+  ENGLISH
+================================================================
+
+THE SHORT ANSWER
+----------------
+Take main. Everything is there - the full source, the documentation
+and images ready to burn. dev is where the work happens and holds
+the same files plus the history that explains them.
+
+
+main
+----
+The branch you want.
+
+  Full source            the kernel configuration, the C library,
+                         init, the shell, every command, the
+                         bare-metal bootloader, the image tools and
+                         the self-test
+  README.md              the long description, in Korean
+  README.en.md           the same document in English
+  GUIDE/USAGE.txt        how to run it, get in, and build it
+  GUIDE/BRANCHES.txt     this file
+  index.html             the download page GitHub Pages serves
+  dist/                  images ready to burn or attach:
+                           test_a_123_LPzero2W_linux.img.xz
+                           linux-LP_amd64.img.xz
+                           test_a_123_LPzero2W_linux-utm.zip
+                           SHA256SUMS.txt
+
+Start with GUIDE/USAGE.txt to run it, README.en.md to understand
+it, and dist/ to just have it.
+
+
+dev
+---
+The development branch. Everything above is committed here first
+and pushed to main once it builds and passes tests/selftest.sh, so
+at any settled moment the two branches hold identical files.
+
+What dev is for is the history. Each commit message explains what
+was wrong and why the fix is shaped the way it is - the part a
+squashed merge throws away. When you want to know why something is
+the way it is, read the log here rather than the code.
+
+Recent work, newest first:
+
+  * A fork bomb was survivable but never over. guard killed nearly
+    ten thousand processes a pass and thousands were left, over and
+    over: what it listed was out of date by the time it signalled.
+    The group is now stopped with SIGSTOP first - a stopped process
+    cannot fork - so one sweep finishes it.
+
+  * The shell had four faults that were quietly wrong rather than
+    loudly broken. `echo x | grep x` answered "command not found",
+    because a pipeline forked and exec'd every stage and echo is a
+    builtin. `cmd ; echo $?` was always 0, because a line was
+    parsed - and $? expanded - before any of it ran. `cmd | while
+    read` did not work at all. And a redirection on the terminator,
+    `done > out`, was silently dropped.
+
+  * One regular expression engine for the whole system, shared by
+    grep, sed and awk. grep had its own, which treated + and ? as
+    operators in a basic expression - so `grep "a+b"` gave the wrong
+    answer with no hint why - and had no groups or alternation at
+    all.
+
+  * apt could never have worked. A Debian base image ships
+    /etc/resolv.conf as a symlink into /run, so writing name servers
+    over it followed the link into a directory that does not exist,
+    failed, and was not checked. Every mirror lookup then failed
+    with "Ign:" and no reason. Verified end to end afterwards on a
+    real boot: update, install and run.
+
+  * You could not add a service. init supervises what is in
+    /etc/services, which lives in the kernel image, so a program of
+    your own could never be supervised - and that is most of what a
+    server needs. It now reads /data/services too, and re-reads it
+    every few seconds so `service add` does not need a reboot.
+
+  * Commands that were missing and are not any more: sed, awk, diff,
+    netstat, echo as a real program, tr, printf, xargs, seq, which,
+    basename, dirname, cmp, nl, rev, yes.
+
+  * Drives that get plugged in, and drives the system keeps -
+    automount and storage.
+
+  * Phase 3: our own firmware boots Linux off the card. Phase 2:
+    the board can say where it died.
+
+  * Every lp_log message was a continuation record, so no reader
+    ever saw one. A kmsg write that does not end in a newline is a
+    continuation: the kernel leaves the record unfinalised and
+    nothing displays it.
+
+
+HOW WORK GETS TO main
+---------------------
+Built for both architectures, run under QEMU, and it has to pass
+tests/selftest.sh with no failures on each. Only then does it move.
+The self-test is not a formality - most of the faults in the list
+above were found by adding a check for something that turned out
+not to work.
+
+
+WHO WROTE ALL OF IT
+-------------------
+Claude Code, Anthropic's coding agent, working from the repository
+owner's direction: the kernel configuration, the C library, init,
+the shell, every command, the bootloader, the build system, the
+self-test and this file.
+
+What that means for how much you should trust it is set out in
+README.en.md under BEFORE YOU RELY ON THIS. The short version: the
+reasoning is unusually well recorded, and nobody independent has
+reviewed any of it.
+
+
+WHAT IS DELIBERATELY NOT IN GIT
+-------------------------------
+All of it comes back from a build:
+
+  blobs/           Broadcom GPU firmware  (tools/fetch-blobs.sh)
+  sdcard/          assembled card images  (tools/mksdcard.sh)
+  keys/            update signing keys. The private key must never
+                   leave your own machine
+  .build/          kernel source, sysroot, staging
+  sdk/ repo/       generated by tools/build-sdk.sh and mkpkg.sh
+
+dist/ would normally be on that list too. The three images are
+checked in anyway, so somebody can download the system and run it
+without setting up a cross toolchain first. They are reproducible
+with ./tools/mkdist.sh, and the checksums beside them are written
+by the same script that writes the images - by hand they go stale
+on the first rebuild somebody forgets, and a checksum that does not
+match is worse than none.
+
+
+WHERE THINGS STAND
+------------------
+Verified, on real QEMU boots of both architectures: the self-test
+passes with no failures, which covers booting, storage, SSH,
+Python, external glibc binaries, graphics, security, error paths,
+redirection, logging, time, the new commands, and the watchdog
+noticing a process pinning a core. Separately verified: a fork bomb
+is cleared in one sweep with init, SSH and the log still running,
+and apt fetches, installs and runs a Debian package.
+
+Not verified: anything on physical Raspberry Pi hardware - the WiFi
+association, the thermal sensors, the hardware watchdog, the EMMC
+driver against a real card. And none of the security work has been
+audited by anybody outside this repository.
+
+The bare-metal plan is finished. Phase 2 gave the board exception
+vectors, the interrupt controllers and a panic handler that decodes
+ESR/FAR/ELR and walks the call path; Phase 3 gave it an Arasan
+SDHCI driver, MBR and FAT32 reading, device-tree rewriting and the
+handover to Linux. So everything below Linux is ours except the two
+Broadcom blobs the GPU boot ROM demands. One gap is stated rather
+than hidden: the loader does not apply device-tree overlays, which
+is invisible on real hardware - start.elf hands us a tree that
+already has them - and named out loud where it is not.
+
+
+================================================================
+  한국어
+================================================================
+
+짧게
+----
+main 을 받으시면 됩니다. 전체 소스, 문서, 바로 구울 수 있는
+이미지가 전부 거기 있습니다. dev 는 작업이 이루어지는 곳이고,
+같은 파일에 더해 그것들이 왜 그렇게 되었는지가 기록으로
+남아 있습니다.
+
+
+main
+----
+받으실 브랜치입니다.
+
+  전체 소스             커널 설정, C 라이브러리, init, 셸, 모든
+                        명령어, 베어메탈 부트로더, 이미지 도구,
+                        셀프테스트
+  README.md             긴 설명, 한국어
+  README.en.md          같은 문서의 영어판
+  GUIDE/USAGE.txt       실행·접속·빌드 방법
+  GUIDE/BRANCHES.txt    이 파일
+  index.html            GitHub Pages 가 서비스하는 다운로드 페이지
+  dist/                 바로 굽거나 붙일 수 있는 이미지:
+                          test_a_123_LPzero2W_linux.img.xz
+                          linux-LP_amd64.img.xz
+                          test_a_123_LPzero2W_linux-utm.zip
+                          SHA256SUMS.txt
+
+돌려보려면 GUIDE/USAGE.txt, 이해하려면 README.md, 그냥 쓰려면
+dist/ 부터 보시면 됩니다.
+
+
+dev
+---
+개발 브랜치입니다. 위의 모든 것이 여기 먼저 커밋되고, 빌드가
+되고 tests/selftest.sh 를 통과한 뒤에 main 으로 올라갑니다.
+그래서 안정된 시점에는 두 브랜치의 파일이 같습니다.
+
+dev 가 존재하는 이유는 기록입니다. 커밋 메시지마다 무엇이
+잘못돼 있었고 왜 그 모양으로 고쳤는지가 적혀 있습니다 —
+스쿼시 병합이 버리는 바로 그 부분입니다. 어떤 것이 왜 그렇게
+되어 있는지 궁금하면 코드보다 여기 로그를 읽는 편이 빠릅니다.
+
+최근 작업, 최신 순:
+
+  * 포크 폭탄에서 기계는 살아남았지만 끝나지 않았습니다. guard
+    가 한 번에 만 개 가까이 죽여도 수천 개가 남는 일이 계속
+    반복됐습니다 — 목록을 만드는 사이에 이미 낡아버리기
+    때문입니다. 이제 SIGSTOP 으로 그룹을 먼저 얼립니다. 멈춘
+    프로세스는 fork 할 수 없으므로 한 번의 패스로 끝납니다.
+
+  * 셸에 조용히 틀린 것이 넷 있었습니다. `echo x | grep x` 가
+    "command not found" 였습니다 — 파이프의 각 단계를 fork 해서
+    exec 하는데 echo 는 내장 명령이라 실행할 파일이 없습니다.
+    `cmd ; echo $?` 는 항상 0이었습니다 — 한 줄이 실행되기 전에
+    통째로 파싱되면서 $? 도 그때 확장됐기 때문입니다. `cmd |
+    while read` 는 아예 동작하지 않았고, `done > out` 같은
+    리디렉션은 조용히 무시됐습니다.
+
+  * 정규식 엔진 하나를 grep, sed, awk 가 함께 씁니다. grep 은
+    자기 것을 갖고 있었고, 기본 정규식에서 + 와 ? 를 연산자로
+    다뤘습니다 — `grep "a+b"` 가 이유도 없이 틀린 답을 냈고,
+    그룹과 선택은 아예 없었습니다.
+
+  * apt 는 애초에 동작할 수 없었습니다. 데비안 베이스 이미지가
+    /etc/resolv.conf 를 /run 안쪽을 가리키는 심볼릭 링크로
+    넣어두는데, 그 위에 네임서버를 쓰면 링크를 따라가 없는
+    디렉터리에 쓰려다 실패했고, 그 실패를 확인하지 않았습니다.
+    그래서 모든 미러 조회가 이유 없이 "Ign:" 이었습니다. 고친
+    뒤 실제 부팅에서 update, install, 실행까지 확인했습니다.
+
+  * 서비스를 추가할 수 없었습니다. init 은 /etc/services 에 있는
+    것을 지키는데 그 파일은 커널 이미지 안에 있어서, 사용자
+    프로그램은 감시받을 방법이 없었습니다 — 서버로 쓰려면 그게
+    핵심입니다. 이제 /data/services 도 읽고, 몇 초마다 다시
+    읽어서 `service add` 에 재부팅이 필요 없습니다.
+
+  * 없던 명령어들: sed, awk, diff, netstat, 실제 프로그램으로서의
+    echo, tr, printf, xargs, seq, which, basename, dirname, cmp,
+    nl, rev, yes.
+
+  * 꽂으면 붙는 드라이브와, 계속 쓸 드라이브 — automount, storage.
+
+  * Phase 3: 자체 펌웨어가 카드에서 리눅스를 올립니다. Phase 2:
+    보드가 어디서 죽었는지 말할 수 있습니다.
+
+  * 자체 로거의 모든 메시지가 continuation 레코드여서 어떤
+    리더에도 보이지 않았습니다. 개행으로 끝나지 않는 kmsg 쓰기는
+    continuation 이고, 커널은 그 레코드를 확정하지 않습니다.
+
+
+main 으로 가는 조건
+-------------------
+두 아키텍처로 빌드하고, QEMU 에서 돌리고, 각각
+tests/selftest.sh 를 실패 없이 통과해야 합니다. 셀프테스트는
+형식적인 절차가 아닙니다 — 위에 적힌 결함 대부분이 "이건
+되겠지" 하고 검사를 추가했다가 안 되는 것을 발견한 경우입니다.
+
+
+누가 다 썼나
+------------
+Anthropic 의 코딩 에이전트인 Claude Code 가 저장소 주인의 지시를
+받아 전부 썼습니다: 커널 설정, C 라이브러리, init, 셸, 모든
+명령어, 부트로더, 빌드 시스템, 셀프테스트, 그리고 이 파일까지.
+
+그것이 신뢰도에 대해 무엇을 뜻하는지는 README.md 의 "믿고 쓰기
+전에"에 적어두었습니다. 짧게 말하면, 판단의 근거는 유난히 잘
+남아 있고, 그것을 독립적으로 검토한 사람은 없습니다.
+
+
+git 에 일부러 넣지 않은 것
+--------------------------
+전부 빌드로 다시 만들어집니다:
+
+  blobs/           라즈베리파이 GPU 펌웨어 (tools/fetch-blobs.sh)
+  sdcard/          조립된 카드 이미지 (tools/mksdcard.sh)
+  keys/            업데이트 서명 키. 개인키는 절대 자기 기계를
+                   떠나면 안 됩니다
+  .build/          커널 소스, 시스루트, 스테이징
+  sdk/ repo/       tools/build-sdk.sh 와 mkpkg.sh 가 만듭니다
+
+dist/ 도 원래는 그 목록에 있어야 합니다. 그래도 이미지 세 개를
+넣어두는 이유는, 크로스 툴체인을 먼저 갖추지 않고도 받아서 바로
+돌려볼 수 있어야 하기 때문입니다. ./tools/mkdist.sh 로 다시 만들
+수 있고, 옆의 체크섬은 이미지를 만드는 그 스크립트가 같이
+씁니다 — 손으로 적으면 누군가 다시 빌드하고 잊는 순간 어긋나고,
+맞지 않는 체크섬은 없는 것보다 나쁩니다.
+
+
+지금 어디까지 확인됐나
+----------------------
+두 아키텍처의 실제 QEMU 부팅에서 셀프테스트가 실패 없이
+통과합니다 — 부팅, 저장소, SSH, 파이썬, 외부 glibc 바이너리,
+그래픽, 보안, 오류 경로, 리다이렉션, 로깅, 시간, 새 명령어들,
+그리고 코어를 붙잡은 프로세스를 워치독이 알아채는지까지
+포함합니다. 따로 확인한 것: 포크 폭탄이 한 번의 패스로
+정리되고 init, SSH, 로그가 살아 있는 것, 그리고 apt 가 데비안
+패키지를 받아 설치하고 실행하는 것.
+
+확인하지 못한 것: 라즈베리파이 실물에서의 모든 것 — WiFi 연결,
+온도 센서, 하드웨어 워치독, 실제 카드 위에서의 EMMC 드라이버.
+그리고 보안 관련 작업 중 어느 것도 이 저장소 밖의 사람에게
+검토받은 적이 없습니다.
+
+베어메탈 계획은 끝났습니다. Phase 2 로 예외 벡터, 인터럽트
+컨트롤러, ESR/FAR/ELR 을 해독하고 호출 경로를 따라가는 패닉
+핸들러가 생겼고, Phase 3 으로 Arasan SDHCI 드라이버, MBR 과
+FAT32 읽기, 디바이스 트리 재작성, 리눅스 인계가 생겼습니다.
+그래서 리눅스 아래는 GPU 부트롬이 요구하는 Broadcom 블롭 두 개를
+빼면 전부 자체 코드입니다. 숨기지 않고 적어두는 빈 곳이 하나
+있습니다: 로더는 디바이스 트리 오버레이를 적용하지 않습니다.
+실기에서는 start.elf 가 이미 적용한 트리를 받으므로 보이지
+않고, 그렇지 않은 환경에서는 로더가 건너뛴 것을 이름을 대며
+말해줍니다.

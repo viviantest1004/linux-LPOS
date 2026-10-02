@@ -1,0 +1,226 @@
+/* The top bar, in the design system's own values.
+ *
+ * Two rules from shell-design-spec.md §2-1 that the CSS has to carry
+ * rather than merely not break:
+ *
+ * No pill behind the status icons. That rounded tinted capsule is
+ * Windows 11's visual signature and putting one here would make this
+ * bar look like that bar. The icons sit side by side with no background
+ * at all, and only gain a 2px underline when their panel is open.
+ *
+ * Amber means a limit. It is on the mode indicator and on a battery
+ * that is nearly flat, and on nothing else - a bar that uses it for
+ * decoration has no colour left for the one case that matters.
+ */
+
+* {
+  font-family: "NanumGothic", "Nanum Gothic", sans-serif;
+  font-size: 13px;
+  border: none;
+  border-radius: 0;
+  /* Zero on the modules so their padding decides their size, and never
+   * on the bar itself - the universal selector reaches window#waybar
+   * too, and a bar with no minimum height collapses to whatever its
+   * tallest child happens to be. It came out three pixels tall. */
+  min-height: 0;
+}
+
+window#waybar {
+  min-height: 30px;
+  /* Translucent over the desktop rather than a solid strip. The
+   * saturate is the half people leave out: blur alone averages what is
+   * behind toward grey, and grey over a colourful wallpaper reads as
+   * frosted plastic instead of glass. */
+  background: rgba(26, 26, 26, 0.72);
+  color: #a8a8a8;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* The workspace rail. Fixed width, and the marker slides inside it. */
+#workspaces {
+  padding: 0 4px 0 11px;
+}
+#workspaces button {
+  padding: 0 5px;
+  margin: 9px 1px;
+  min-width: 12px;
+  color: transparent;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 2px;
+}
+#workspaces button.focused,
+#workspaces button.visible {
+  background: #e8e8e8;
+}
+#workspaces button.urgent {
+  background: #f0b350;
+}
+
+#custom-search {
+  color: #6a6a6a;
+  padding: 0 10px;
+}
+#custom-search:hover { color: #a8a8a8; }
+
+#tray { padding: 0 6px; }
+
+/* Amber is the mode group and nothing else.
+ *
+ * 2-4: 방해 금지·비행기·절전이 켜져 있을 때만 여기에 글리프가 들어간다.
+ * 빈 문자열이면 padding 까지 0 이어야 한다 - 아무것도 없는 자리가
+ * 12px 을 차지하면 시계와 트레이 사이가 이유 없이 벌어지고, 모드가
+ * 켜졌을 때 무엇이 달라졌는지가 흐려진다. GTK CSS 에 :empty 가 없어서
+ * padding 을 글리프 쪽에 붙이지 못하므로, 좌우 여백을 label 이 아니라
+ * 글자 간격으로 준다. */
+#custom-mode {
+  color: #f0b350;
+  letter-spacing: 4px;
+  margin-right: 2px;
+}
+
+#custom-ime {
+  color: #e8e8e8;
+  font-weight: 500;
+  padding: 0 7px;
+  border-bottom: 2px solid transparent;
+}
+#custom-ime:hover { border-bottom-color: #e8e8e8; }
+
+#clock {
+  color: #a8a8a8;
+  padding: 0 10px;
+  /* Tabular figures. A clock whose column width changes as the minute
+   * ticks over is a clock that nudges everything beside it once a
+   * minute, all day.
+   *
+   * GTK's CSS parser wants the value unquoted and without the 1; the
+   * CSS-standard spelling is a syntax error here and takes the rest of
+   * the rule with it. */
+  font-feature-settings: "tnum";
+}
+
+/* ── 오른쪽 상태 묶음 ─────────────────────────────────────────────
+ *
+ * 2-1: 이 넷은 하나의 정보 덩어리로 읽혀야 한다. 그리고 그 덩어리가
+ * 퀵메뉴를 여는 버튼이다.
+ *
+ * "알약 배경을 깔지 않는다 - 그것은 윈도우 11 의 시각적 서명이다"
+ * 라고 오래 적어 두었었다. 그 결과는 누를 수 있는지 보이지 않는
+ * 아이콘 넷이었고, 옆에 ⌄ 버튼을 따로 달아 봐도 그건 이 화면에만
+ * 있는 규칙이라 아무도 모른다. 우분투도 맥도 이 자리를 하나로 묶고
+ * 그 덩어리를 누르면 패널이 열린다. 배경은 장식이 아니라 "여기가
+ * 버튼이다" 라는 말이고, 그 말을 안 하는 쪽이 더 비쌌다.
+ *
+ * 숫자가 붙으면서 폭이 변하는 것이 문제가 되었다. 볼륨이 9% 에서
+ * 10% 로 갈 때 왼쪽의 시계까지 밀린다. tnum 은 숫자 글리프의 폭을
+ * 같게 만들어 그 흔들림을 자릿수가 바뀔 때 한 번으로 줄인다. */
+/* 알약은 CSS 로 만든다.
+ *
+ * waybar 0.9.17 의 group/ 은 가로 바 안에서도 칸을 세로로 쌓는다 -
+ * 서랍(drawer)을 위한 것이기 때문이다. 두 칸을 넣으면 필요한 높이가
+ * 23+23=46 이 되고, 바는 30 이라 그 묶음이 통째로 그려지지 않는다.
+ * 로그에 남는 말은 "Requested height: 30 is less than the minimum
+ * height: 46 required by the modules" 한 줄뿐이라, 화면만 보고는
+ * 무엇이 없어졌는지 알 수 없다.
+ *
+ * 그래서 칸마다 같은 배경을 주고 양 끝만 둥글린다. 가운데 칸은
+ * 하드웨어에 따라 사라지지만(가상 머신에는 배터리도 백라이트도
+ * 없다) 양 끝인 network 와 ⌄ 는 늘 있으므로 모양이 무너지지 않는다.
+ *
+ * 반지름이 999px 이 아닌 것도 이유가 있다: GTK3 은 마주 보는 두
+ * 모서리의 반지름 합을 최소 크기에 넣는다. 높이가 24px 이면 12px 이
+ * 이미 반원이고, 그보다 크게 적으면 바가 커져야 한다고 말한다.
+ *
+ * 숫자가 붙으면서 폭이 변하는 것이 문제가 되었다. 볼륨이 9% 에서
+ * 10% 로 갈 때 왼쪽의 시계까지 밀린다. tnum 은 숫자 글리프의 폭을
+ * 같게 만들어 그 흔들림을 자릿수가 바뀔 때 한 번으로 줄인다. */
+#network,
+#backlight,
+#pulseaudio,
+#battery,
+#custom-quick {
+  background: rgba(255, 255, 255, 0.09);
+  color: #d0d0d0;
+  margin: 2px 0;
+  padding: 0 7px;
+  font-feature-settings: "tnum";
+}
+
+/* 왼쪽 끝. network 는 연결이 없어도 ⚠ 를 그리므로 사라지지 않는다. */
+#network {
+  border-radius: 11px 0 0 11px;
+  margin-left: 6px;
+  padding-left: 10px;
+}
+
+/* 오른쪽 끝. 하드웨어와 무관하게 늘 있다 - 알약의 바닥이 이것이다. */
+#custom-quick {
+  border-radius: 0 11px 11px 0;
+  margin-right: 8px;
+  padding: 0 9px 0 4px;
+  font-size: 11px;
+}
+
+/* 하나가 밝아지는 것이 아니라 알약 전체가 밝아진다. 그래야 다섯 칸이
+ * 한 버튼이라는 것이 읽힌다. */
+#network:hover,
+#backlight:hover,
+#pulseaudio:hover,
+#battery:hover,
+#custom-quick:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+/* 연결이 끊긴 것은 상태가 아니라 문제다. 1-3 은 빨강을 실패에
+ * 주었고, 네트워크가 없는 것은 실패다. */
+#network.disconnected {
+  color: #e05252;
+}
+
+/* 음소거는 꺼진 것이지 잘못된 것이 아니므로 색이 아니라 밝기로
+ * 말한다 - 1-3 의 "켜짐/꺼짐은 색이 아니라 글자 밝기로". */
+#pulseaudio.muted {
+  color: #6a6a6a;
+}
+
+/* 배터리는 한도이므로 앰버, 그리고 정말로 곧 꺼질 때만 빨강.
+ * 20% 에서 빨강을 쓰면 10% 에 쓸 색이 남지 않는다. */
+#battery.warning  { color: #f0b350; }
+#battery.critical { color: #e05252; }
+
+/* ── 작업표시줄 ───────────────────────────────────────────────────
+ *
+ * 열려 있는 창이 여기 있고, 눌러서 부르고 다시 눌러서 치운다.
+ * 창이 하나도 없으면 이 자리는 비어 있어야 한다 - 빈 상자가 검색
+ * 글자 옆에 붙어 있으면 그것이 무엇인지 묻게 된다. */
+#taskbar {
+  margin-left: 10px;
+}
+
+#taskbar button {
+  color: #a8a8a8;
+  padding: 0 10px;
+  margin: 3px 2px;
+  border-radius: 6px;
+  background: transparent;
+  min-width: 0;
+}
+
+#taskbar button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8e8e8;
+}
+
+/* 지금 보고 있는 창. 1-3 은 켜짐/꺼짐을 색이 아니라 글자 밝기로
+ * 구분하라고 했고, 여기가 그 규칙이 가장 자주 읽히는 자리다. */
+#taskbar button.active {
+  background: rgba(255, 255, 255, 0.10);
+  color: #e8e8e8;
+}
+
+/* 최소화된 창은 있지만 지금 보이지 않는 것이다. 사라지게 두면
+ * 최소화가 곧 잃어버림이 된다. */
+#taskbar button.minimized {
+  color: #6a6a6a;
+}

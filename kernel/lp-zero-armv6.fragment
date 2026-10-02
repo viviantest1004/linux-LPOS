@@ -1,0 +1,184 @@
+# lp-zero-armv6.fragment - what a Pi Zero W needs that a Zero 2 W does not.
+#
+# Read after the arm64 answers (see tools/mkarmv6config.sh), so anything
+# here wins.
+#
+# The board: BCM2835, one ARM1176JZF-S core at 1GHz, 512MB, no ethernet,
+# a BCM43438 for WiFi on SDIO, and micro-USB in OTG mode. The chip is
+# ARMv6K - not a smaller ARMv8, a different instruction set. Nothing
+# built for the Zero 2 W runs on it.
+
+# ── The processor ──────────────────────────────────────────────
+# bcmrpi_defconfig already selects ARCH_MULTI_V6 and CPU_V6; these are
+# here so the build fails loudly rather than quietly producing an ARMv7
+# kernel that halts on the first instruction the chip does not have.
+CONFIG_ARCH_MULTI_V6=y
+CONFIG_ARCH_MULTI_V7=n
+CONFIG_ARCH_BCM=y
+CONFIG_ARCH_BCM2835=y
+CONFIG_AEABI=y
+# The old ABI is a second syscall path with different structure layouts,
+# kept for binaries built before 2005. Ours are not.
+CONFIG_OABI_COMPAT=n
+# VFPv2, which this chip has. NEON, which it does not, is off by not
+# being selectable on ARMv6 at all.
+CONFIG_VFP=y
+CONFIG_NEON=n
+# One core. SMP on a single-core chip costs locks and memory for nothing.
+CONFIG_SMP=n
+
+# ── Memory ─────────────────────────────────────────────────────
+# 512MB, all of it below 1GB, so there is no high memory to map.
+CONFIG_HIGHMEM=n
+# 4KB pages. The 16KB/64KB choices are arm64-only anyway; saying it here
+# keeps the answer in one place.
+CONFIG_PAGE_SIZE_4KB=y
+
+# ── Boot ───────────────────────────────────────────────────────
+# The GPU firmware loads a zImage - a kernel with its own decompressor
+# stuck to the front - and jumps to it. There is no UEFI on this board
+# and no second compressed copy to build.
+CONFIG_ZBOOT_ROM=n
+# The device tree comes from start.elf, which patches in the memory size
+# and the board serial number before handing it over. Building the DTBs
+# is what puts bcm2708-rpi-zero-w.dtb where mksdcard.sh can find it.
+CONFIG_ATAGS=n
+CONFIG_USE_OF=y
+CONFIG_ARM_APPENDED_DTB=n
+
+# ── Serial console ─────────────────────────────────────────────
+# Same as the Zero 2 W: PL011 is wired to the Bluetooth chip by default
+# and the disable-bt overlay moves it to the header pins. The mini UART
+# (8250) stays off - its baud rate follows the core clock, which moves.
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+
+# ── USB ────────────────────────────────────────────────────────
+# One micro-USB port in OTG mode: a hub and an ethernet adapter through
+# a gender changer, or a network link to a PC. dwc2, not dwc_otg - the
+# mainline driver, which is what this tree's ARCH_BCM2835 selects.
+CONFIG_USB=y
+CONFIG_USB_DWC2=y
+CONFIG_USB_DWC2_DUAL_ROLE=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_ETH=y
+CONFIG_USB_USBNET=y
+CONFIG_USB_NET_SMSC95XX=y
+
+# ── Wireless ───────────────────────────────────────────────────
+# BCM43438 on SDIO. Same driver and same firmware directory as the
+# Zero 2 W; only the firmware file name differs, and brcmfmac picks that
+# from the device tree.
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_MMC_SDHCI_IPROC=y
+CONFIG_MMC_BCM2835=y
+CONFIG_BRCMFMAC=y
+CONFIG_BRCMFMAC_SDIO=y
+
+# ── Framebuffer ────────────────────────────────────────────────
+# The GPU hands over a linear framebuffer through the mailbox; fbcon
+# draws the console on it. No DRM, no 3D - there is no GPU driver on
+# this board worth the megabytes.
+CONFIG_FB=y
+CONFIG_FB_BCM2708=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FONT_TER16x32=y
+
+# ── Size ───────────────────────────────────────────────────────
+# One core at 1GHz reading from an SD card. Every megabyte of kernel is
+# a megabyte of RAM that never comes back, because the root filesystem
+# lives inside the kernel image.
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+
+# ── Power domains ──────────────────────────────────────────────
+# Two drivers claim to do this and only one of them is right here.
+#
+# BCM2835_POWER talks to the ASB registers directly. RASPBERRYPI_POWER
+# asks the GPU firmware. The device tree for this board names
+# "raspberrypi,bcm2835-power" - the firmware one - for USB, HDMI, the
+# camera interfaces and V3D, and the kernel's own help text says that
+# once the firmware owns a domain, Linux must go through the firmware
+# for it. So the ASB driver has no domains to manage and is loaded only
+# because bcm2835-pm adds it as a second cell next to the watchdog.
+#
+# It is not harmless. On a machine where those registers do not answer
+# it takes an external abort inside its probe, in a kworker, with
+# interrupts disabled - which ends the boot at about two seconds, with
+# the last line on the console being the watchdog registering.
+CONFIG_BCM2835_POWER=n
+CONFIG_RASPBERRYPI_POWER=y
+
+# ── The one USB device controller ──────────────────────────────
+# g_zero is a test gadget: it answers as a device that does nothing,
+# for exercising a UDC driver. It is not useful here, and on a board
+# with exactly one controller it is worse than useless - in
+# drivers/usb/gadget/legacy/Makefile g_zero.o links before g_ether.o,
+# so it claims the UDC first and the ethernet gadget never binds. The
+# boot log says "UDC core: g_ether: couldn't find an available UDC"
+# and the USB network link, which is the way into a board whose WiFi
+# is misbehaving, is simply not there.
+CONFIG_USB_ZERO=n
+
+# ── The console font ───────────────────────────────────────────
+# CONFIG_FONTS is the "choose which fonts to build" menu. Without it
+# only the default 8x16 is compiled in, and fbcon quietly falls back to
+# it - so cmdline.txt asking for font:TER16x32 did nothing at all, and
+# nothing said so. On a 1080p screen 8x16 is about two millimetres tall.
+CONFIG_FONTS=y
+CONFIG_FONT_TER16x32=y
+CONFIG_FONT_8x16=y
+
+# ── WiFi power save: off, in the kernel ─────────────────────────────
+#
+# This is the one that costs you the network.
+#
+# CONFIG_CFG80211_DEFAULT_PS=y comes in from the Raspberry Pi defconfig
+# and means cfg80211 turns power save on for every wireless interface as
+# it is created. On a BCM43430 the chip then sleeps between beacons -
+# and the AP sends EAPOL 1/4, the first frame of the WPA2 handshake,
+# immediately after association, to a station that is asleep.
+#
+# What that looks like from outside is exactly what the board did:
+#
+#     wlan0: Associated with 5a:86:94:4c:53:94
+#     wlan0: Authentication with 5a:86:94:4c:53:94 timed out.
+#     wlan0: Added BSSID into ignore list
+#
+# with 33 packets received (beacons, which arrive at TIM boundaries and
+# wake it) and not one EAPOL frame. It reads like a wrong passphrase and
+# is not: a wrong key gets you 4-Way Handshake failed, because the
+# frames arrive and the maths fails. Here nothing arrives at all.
+#
+# There was already a defence against this - `net powersave off wlan0`
+# in /etc/rc - and it is still there. But it is a userspace command
+# speaking generic netlink that has never once been shown to work on a
+# board, because qemu-user permits only NETLINK_ROUTE and there was no
+# other way to run it. Depending on it was the mistake. Turned off in
+# the kernel, the chip never enables power save in the first place, on
+# the very first association, with nothing having to run correctly
+# first.
+#
+# The cost is idle current: a few tens of milliamps on a board that is
+# mains-powered and whose entire purpose is answering the network.
+CONFIG_CFG80211_DEFAULT_PS=n
+
+# ── The regulatory database ─────────────────────────────────────────
+#
+# The boot log says, on every boot:
+#
+#     platform regulatory.0: Direct firmware load for regulatory.db
+#                            failed with error -2
+#     cfg80211: failed to load regulatory.db
+#
+# and it is right - the file was never put on the image. Without it
+# cfg80211 falls back to the world domain, which is the most
+# conservative set of rules there is: reduced power, and several
+# channels marked no-IR, meaning the station may not transmit on them
+# until it has heard a beacon. A marginal link on a board sitting next
+# to its router is what that looks like.
+#
+# The file itself is data, not code - it is fetched by
+# tools/fetch-wifi-fw.sh with its signature (regulatory.db.p7s), which
+# the kernel checks against the certificates it says it loaded on the
+# line above.

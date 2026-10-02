@@ -1,0 +1,149 @@
+#!/usr/bin/dash
+# lp-gpu-run - run one program on the discrete GPU, and say whether that
+# GPU is asleep.
+#
+#   lp-gpu-run COMMAND [ARG...]   run COMMAND rendering on the GTX 960M
+#   lp-gpu-run --status           list the GPUs and the discrete one's power state
+#
+# The XPS 15 9550 is an Optimus laptop with no mux: the panel, HDMI and
+# Thunderbolt are all wired to the Intel HD 530, and the GTX 960M has no
+# outputs of its own. The desktop therefore always draws on Intel
+# (graphics-env.sh pins the compositor to that card with WLR_DRM_DEVICES),
+# and the NVIDIA GPU is powered off - nouveau runtime-suspends it five
+# seconds after the last user and the firmware's _PR3 power resources cut
+# it to D3cold. That is the default because on battery the 960M costs
+# watts whenever it is merely on.
+#
+# This wrapper is the way to use it on purpose: it sets DRI_PRIME to the
+# NVIDIA GPU's PCI address, Mesa then renders that one program on it
+# ("render offload") and hands finished frames to the compositor on the
+# Intel side. The GPU wakes when the program starts and goes back to
+# D3cold a few seconds after it exits.
+#
+# Be honest about what that buys with nouveau. nouveau has no clock
+# control for Maxwell GM107 (nvkm has no GM107 clock driver), so the 960M
+# runs at the conservative clocks the VBIOS boots it with - a fraction of
+# its rated speed. In practice it is often no faster than the HD 530 and
+# sometimes slower, while drawing more power. It is useful for testing, or
+# for an OpenGL program that misbehaves on iris, not for speed. Mesa 22.3
+# has no Vulkan driver for nouveau, so Vulkan programs stay on Intel.
+#
+# The fast route is NVIDIA's own driver (Debian's nvidia-driver, the 525
+# series, supports Maxwell) with PRIME render offload. It is not the
+# default, and cannot be yet, because: it is a kernel module and this
+# kernel is built without module support (CONFIG_MODULES=n), and even
+# with modules it must be rebuilt by DKMS against our kernel's headers on
+# every kernel update. Worse for a laptop, NVIDIA's runtime D3 power
+# management only covers Turing and newer, so on a 960M the proprietary
+# driver keeps the GPU powered (idling, but on) where nouveau switches it
+# off. If that driver is ever installed, this script detects it and uses
+# its offload variables instead (__NV_PRIME_RENDER_OFFLOAD and friends).
+#
+# Written for dash, not /bin/sh: /bin/sh here is our own shell, and the
+# build of it this was written against passes "$@" on as one word - a
+# wrapper whose whole job is to hand its arguments through unchanged
+# cannot rely on that. dash is Essential in Debian, so it is always there.
+
+me=lp-gpu-run
+
+# The NVIDIA GPU is found on the PCI bus (vendor 10de, class 03xxxx
+# display controller), not through DRM, so that --status can also report
+# a GPU that has no driver bound at all.
+dgpu=
+for dev in /sys/bus/pci/devices/*; do
+    [ -r "$dev/vendor" ] && [ -r "$dev/class" ] || continue
+    read -r vendor < "$dev/vendor"
+    read -r class < "$dev/class"
+    case "$vendor:$class" in
+    0x10de:0x03*) dgpu=$dev ;;
+    esac
+done
+
+driver_of() {
+    if [ -e "$1/driver" ]; then
+        d=$(readlink "$1/driver")
+        echo "${d##*/}"
+    else
+        echo none
+    fi
+}
+
+render_of() {
+    for r in "$1"/drm/renderD*; do
+        [ -e "$r" ] && echo "/dev/dri/${r##*/}" && return
+    done
+    echo "-"
+}
+
+status() {
+    for card in /sys/class/drm/card*; do
+        case "${card##*/}" in *-*) continue ;; esac
+        [ -e "$card/device" ] || continue
+        dev=$(readlink -f "$card/device")
+        boot=0
+        [ -r "$dev/boot_vga" ] && read -r boot < "$dev/boot_vga"
+        role="second GPU"
+        [ "$boot" = 1 ] && role="draws the desktop"
+        printf '%-8s %s  %-8s %-18s %s\n' "${card##*/}" "${dev##*/}" \
+            "$(driver_of "$dev")" "$(render_of "$dev")" "$role"
+    done
+    if [ -z "$dgpu" ]; then
+        echo "no NVIDIA GPU on the PCI bus"
+        return
+    fi
+    drv=$(driver_of "$dgpu")
+    rs=unknown
+    ps=unknown
+    [ -r "$dgpu/power/runtime_status" ] && read -r rs < "$dgpu/power/runtime_status"
+    [ -r "$dgpu/power_state" ] && read -r ps < "$dgpu/power_state"
+    echo "discrete GPU ${dgpu##*/}: driver $drv, runtime_status $rs, power_state $ps"
+    case "$drv:$rs" in
+    none:*)       echo "  no driver bound: nothing can switch it off, it stays in D0 and draws power" ;;
+    *:suspended)  echo "  asleep - this is the normal state" ;;
+    *:active)     echo "  AWAKE - something is using it (a program run with lp-gpu-run, or a" \
+                       "process holding /dev/dri for it open); it sleeps again ~5 s after the last user" ;;
+    *)            echo "  runtime PM state not available" ;;
+    esac
+}
+
+case "$1" in
+--status)
+    status
+    exit 0
+    ;;
+-h|--help|"")
+    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
+    [ -n "$1" ]
+    exit $?
+    ;;
+esac
+
+if [ -z "$dgpu" ]; then
+    echo "$me: no discrete GPU here, running $1 on the integrated one" >&2
+    exec "$@"
+fi
+
+case "$(driver_of "$dgpu")" in
+nouveau)
+    # Mesa's loader matches DRI_PRIME=pci-DDDD_BB_SS_F against the bus
+    # address of each DRM device, so this names the 960M exactly rather
+    # than "whichever GPU is not the default".
+    addr=${dgpu##*/}
+    tag=$(echo "$addr" | tr ':.' '__')
+    DRI_PRIME=pci-$tag
+    export DRI_PRIME
+    exec "$@"
+    ;;
+nvidia)
+    __NV_PRIME_RENDER_OFFLOAD=1
+    __GLX_VENDOR_LIBRARY_NAME=nvidia
+    __VK_LAYER_NV_optimus=NVIDIA_only
+    export __NV_PRIME_RENDER_OFFLOAD __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
+    exec "$@"
+    ;;
+*)
+    echo "$me: the NVIDIA GPU has no driver bound (see lp-gpu-run --status)," \
+         "running $1 on the integrated GPU" >&2
+    exec "$@"
+    ;;
+esac

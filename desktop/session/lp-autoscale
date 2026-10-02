@@ -1,0 +1,535 @@
+#!/usr/bin/python3
+"""lp-autoscale - scale 2 on high-density outputs, 1 elsewhere, and the
+screen someone chose in Settings put back.
+
+The XPS 15's panel is 3840x2160 on 15.6 inches: at scale 1 every button
+is a quarter of the size a finger needs. An external 1080p monitor wants
+scale 1. Neither compositor's config can say "if the mode is wider than
+2560", so this runs once the session is up (lp-shell-start) and, under
+sway, again on every config reload (exec_always), and asks the compositor.
+
+--watch keeps it running and does it again whenever the graphics card
+reports a change: a VM window made bigger or smaller (UTM, QEMU) sends
+the guest a new preferred mode, and neither compositor switches to it
+by itself - the screen stayed at the size it started with. So on every
+change an output nobody chose a mode for is put on its preferred mode.
+
+What Settings > Display chose wins over all of that, per output, in
+$XDG_CONFIG_HOME/lp (the same directory lp-settings writes):
+
+  mode-<output>       1920x1080@60.000Hz   that mode, never "preferred";
+                                           and no scale guess either
+  scale-<output>      1.25                 that scale
+  transform-<output>  90                   that rotation
+
+These files are also how a chosen mode comes back at login under sway,
+which has no config file of ours to start from (wayfire has
+[output:<name>] in wayfire.ini as well). Settings > Display > Resolution
+> "Automatic" removes mode- and scale-, and the output follows the window
+again.
+
+While Settings asks "keep these display settings?" it leaves
+$XDG_RUNTIME_DIR/lp-display-hold-<output>; an output with a hold younger
+than a minute is not touched at all - the VM window following the new
+mode must not put the old one back under the question.
+
+It talks wlr-output-management through wlr-randr, which wayfire and
+sway both implement, so the same program serves the session on a GPU
+(wayfire) and the one without (sway). swaymsg is the fallback for a
+root without wlr-randr.
+"""
+import json, os, re, select, shutil, subprocess, sys, time
+
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "lp")
+HOLD_SECS = 60
+
+
+def log(*a):
+    print("lp-autoscale:", *a, file=sys.stderr, flush=True)
+
+
+def run(argv):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def call(argv):
+    log(" ".join(argv))
+    try:
+        r = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           text=True, timeout=10)
+        if r.returncode != 0:
+            log("  failed:", (r.stderr or "").strip())
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        log("  failed:", e)
+        return False
+
+
+def outputs_wlr_randr(every=False):
+    """[{name, width, scale, transform, cur, pref, modes}] from wlr-randr's
+    text (0.2 has no --json). A mode is (w, h, mHz, "WxH@HzHz").
+
+      Virtual-1 "Red Hat, Inc. QEMU Monitor (Virtual-1)"
+        Enabled: yes
+        Modes:
+          1920x1080 px, 74.998001 Hz (preferred, current)
+        Transform: normal
+        Scale: 1.000000
+    """
+    out, cur = [], None
+    for line in run(["wlr-randr"]).splitlines():
+        if line and not line[0].isspace():
+            cur = {"name": line.split()[0], "width": 0, "scale": 1.0, "enabled": True,
+                   "transform": "normal", "cur": None, "pref": None, "modes": []}
+            out.append(cur)
+        elif cur is not None:
+            s = line.strip()
+            m = re.match(r"(\d+)x(\d+) px, ([\d.]+) Hz", s)
+            if m:
+                mode = (int(m.group(1)), int(m.group(2)), int(round(float(m.group(3)) * 1000)),
+                        "%sx%s@%sHz" % (m.group(1), m.group(2), m.group(3)))
+                cur["modes"].append(mode)
+                if re.search(r"\bcurrent\b", s):
+                    cur["width"] = mode[0]
+                    cur["cur"] = mode
+                if re.search(r"\bpreferred\b", s):
+                    cur["pref"] = mode
+            elif s.startswith("Scale:"):
+                try:
+                    cur["scale"] = float(s.split()[1])
+                except (IndexError, ValueError):
+                    pass
+            elif s.startswith("Transform:"):
+                cur["transform"] = s.split(":", 1)[1].strip() or "normal"
+            elif s.startswith("Enabled:"):
+                cur["enabled"] = s.endswith("yes")
+    return out if every else [o for o in out if o["enabled"] and o["width"]]
+
+
+def outputs_sway():
+    try:
+        data = json.loads(run(["swaymsg", "-r", "-t", "get_outputs"]) or "[]")
+    except ValueError:
+        return []
+    outs = []
+    for o in data:
+        if not o.get("active", True):
+            continue
+        cm = o.get("current_mode") or {}
+        modes = [(m.get("width", 0), m.get("height", 0), m.get("refresh", 0),
+                  "%dx%d@%.3fHz" % (m.get("width", 0), m.get("height", 0),
+                                    m.get("refresh", 0) / 1000.0))
+                 for m in o.get("modes") or []]
+        cur = (cm.get("width", 0), cm.get("height", 0), cm.get("refresh", 0), "")
+        outs.append({"name": o.get("name", ""), "width": cur[0],
+                     "scale": float(o.get("scale") or 1),
+                     "transform": o.get("transform") or "normal",
+                     "cur": cur, "pref": None, "modes": modes})
+    return outs
+
+
+def pinned(kind, name):
+    """What Settings chose for this output, or None."""
+    try:
+        with open(os.path.join(CONF, "%s-%s" % (kind, name))) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def held(name):
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if not rt:
+        return False
+    try:
+        age = time.time() - os.stat(os.path.join(rt, "lp-display-hold-" + name)).st_mtime
+    except OSError:
+        return False
+    return age < HOLD_SECS
+
+
+def parse_mode(text):
+    """"1920x1080@60.000Hz" or "1920x1080" -> (w, h, mHz or None)."""
+    m = re.match(r"\s*(\d+)x(\d+)(?:@([\d.]+)(?:Hz)?)?\s*$", text or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), \
+        int(round(float(m.group(3)) * 1000)) if m.group(3) else None
+
+
+def same(mode, want):
+    return mode is not None and mode[0] == want[0] and mode[1] == want[1] and \
+        (want[2] is None or abs(mode[2] - want[2]) < 500)
+
+
+def find_mode(o, want):
+    """The offered mode that is `want`: same size, nearest refresh (the
+    highest when no refresh was given)."""
+    best = None
+    for m in o["modes"]:
+        if m[0] != want[0] or m[1] != want[1]:
+            continue
+        if want[2] is None:
+            if best is None or m[2] > best[2]:
+                best = m
+        elif best is None or abs(m[2] - want[2]) < abs(best[2] - want[2]):
+            best = m
+    if best is not None and want[2] is not None and abs(best[2] - want[2]) >= 1000:
+        return None
+    return best
+
+
+# Drawing in software (sway with pixman, a VM without 3D), every frame
+# costs its pixels in CPU time and, on a virtual GPU, in a copy to the
+# host: a UTM window full-screen on a 27-inch 5K monitor offers
+# 5120x2880, fifteen million pixels a frame, which no emulated CPU keeps
+# up with - the pointer is the first thing that lags. Above this many
+# pixels the largest offered mode of the same shape under it is used
+# instead (the host scales it up to the window).
+#
+# In a virtual machine the same limit holds with 3D too: every GTK window
+# still draws itself on the (emulated) CPU, and the compositor's frames go
+# through virgl. And the mode keeps the window's shape: a 16:10 mode on a
+# 16:9 screen was black bars left and right. When the virtual GPU offers
+# no mode of that shape under the limit, it gets one of its own (a custom
+# mode; virtio-gpu takes any size) - 5120x2880 becomes 2560x1440, the
+# desktop the same size it was at scale 2, a quarter of the pixels.
+SOFTWARE_MAX_PIXELS = 2560 * 1600
+
+
+def software_rendering():
+    return "sway" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower() or \
+        os.environ.get("WLR_RENDERER") == "pixman"
+
+
+def virtual_gpu():
+    for card in os.listdir("/sys/class/drm"):
+        if not re.match(r"card\d+$", card):
+            continue
+        drv = os.path.realpath("/sys/class/drm/%s/device/driver" % card)
+        if os.path.basename(drv) in ("virtio_gpu", "virtio-pci", "virtio_pci"):
+            return True
+    return False
+
+
+def custom(w, h, mhz=60000):
+    """A mode the GPU did not list, as a tuple like the listed ones; its
+    string is what wlr-randr --custom-mode takes."""
+    return (w, h, mhz, "%dx%d@%.3fHz" % (w, h, mhz / 1000.0))
+
+
+def fit_mode(o):
+    pref = o["pref"]
+    vm = virtual_gpu()
+    if not (software_rendering() or vm) or pref[0] * pref[1] <= SOFTWARE_MAX_PIXELS:
+        return pref
+    ratio = pref[0] / pref[1]
+    fits = [m for m in o["modes"] if m[0] * m[1] <= SOFTWARE_MAX_PIXELS]
+    same_shape = [m for m in fits if abs(m[0] / m[1] - ratio) < 0.02]
+    if same_shape:
+        best = max(same_shape, key=lambda m: (m[0] * m[1], m[2]))
+    elif vm:
+        # Halve until it fits: the same shape, and an even division of the
+        # host's pixels so the picture scales up cleanly.
+        w, h, n = pref[0], pref[1], 1
+        while (w // n) * (h // n) > SOFTWARE_MAX_PIXELS:
+            n += 1
+        best = custom(w // n // 2 * 2, h // n // 2 * 2)
+    elif fits:
+        best = max(fits, key=lambda m: (m[0] * m[1], m[2]))
+    else:
+        return pref
+    log(o["name"], "preferred %dx%d is too many pixels to draw here; %s instead"
+        % (pref[0], pref[1], best[3]))
+    return best
+
+
+def smaller_modes(o, tried):
+    """Offered modes smaller than `tried` ("WxH@HzHz"), largest first,
+    one refresh rate per size (the highest)."""
+    t = parse_mode(tried.replace("Hz", ""))
+    if t is None:
+        return []
+    by_size = {}
+    for m in o["modes"]:
+        if m[0] * m[1] < t[0] * t[1]:
+            k = (m[0], m[1])
+            if k not in by_size or m[2] > by_size[k][2]:
+                by_size[k] = m
+    return sorted(by_size.values(), key=lambda m: m[0] * m[1], reverse=True)[:8]
+
+
+def guess(o):
+    # A virtual machine draws at scale 1: fit_mode already gave a large
+    # window a mode of half its pixels, so the desktop is the size scale 2
+    # would have made it - and at 2560 wide scale 2 made it 1280 wide.
+    if virtual_gpu():
+        return "1"
+    # The panel's own width, not the mode's: under software rendering
+    # (the setup kiosk, sway) fit_mode can put a 3840x2160 panel on
+    # 2560x1440, and scale 2 of that was a 1280x720 desktop - the setup
+    # card, up to 840 pixels tall, did not fit and was cut off. The scale
+    # that keeps the desktop the size the panel's own mode would have
+    # had: 3840 at 2 is 1920 wide, so 2560 gets 1.333.
+    native = o["pref"][0] if o.get("pref") else max([m[0] for m in o["modes"]] or [o["width"]])
+    want = 2.0 if native >= 2560 else 1.0
+    if 0 < o["width"] < native:
+        s = o["width"] * want / native
+        return "1" if s <= 1.0 else "%.3f" % s
+    return "2" if want == 2.0 else "1"
+
+
+INTERNAL = ("eDP", "LVDS", "DSI")
+
+
+def keep_a_screen():
+    """The laptop's own screen on, and never no screen at all.
+
+    Settings could turn the built-in panel off while an external display
+    was connected, and wrote "mode = off" for it into wayfire.ini: with
+    the external display gone - unplugged, or the next start without it -
+    the session came up with every screen dark and no way to see
+    anything. Settings no longer offers that; this puts right a home or
+    a moment where it happened anyway: a built-in panel that is off is
+    turned on, and its "off" in wayfire.ini goes back to "auto", or
+    wayfire would turn it off again the next time it reads the file. With
+    no built-in panel and nothing on, the first connected output is
+    turned on."""
+    if not shutil.which("wlr-randr"):
+        return
+    outs = outputs_wlr_randr(every=True)
+    if not outs:
+        return
+    internal = [o for o in outs if o["name"].startswith(INTERNAL)]
+    want = [o for o in internal if not o["enabled"]]
+    if not want and not any(o["enabled"] for o in outs):
+        want = outs[:1]
+    for o in want:
+        log(o["name"], "was off: on again (the built-in screen, or the only one, stays on)")
+        call(["wlr-randr", "--output", o["name"], "--on"])
+        unoff_wayfire_ini(o["name"])
+
+
+def unoff_wayfire_ini(name):
+    ini = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                       "wayfire.ini")
+    try:
+        with open(ini) as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return
+    sec, changed = None, False
+    for i, l in enumerate(lines):
+        t = l.strip()
+        if t.startswith("[") and t.endswith("]"):
+            sec = t[1:-1]
+        elif sec == "output:" + name and re.match(r"mode\s*=\s*off$", t):
+            lines[i] = "mode = auto"
+            changed = True
+    if changed:
+        with open(ini + ".lp-new", "w") as f:
+            f.write("\n".join(lines))
+        os.replace(ini + ".lp-new", ini)
+
+
+def apply():
+    keep_a_screen()
+    use_randr = shutil.which("wlr-randr") is not None
+    outs = outputs_wlr_randr() if use_randr else outputs_sway()
+    changed = False
+    for o in outs:
+        name = o["name"]
+        if held(name):
+            log(name, "held by Settings, left alone")
+            continue
+        args = []
+        pin = pinned("mode", name)
+        want = parse_mode(pin) if pin else None
+        if pin and want is None:
+            log(name, "ignoring unreadable mode-%s: %r" % (name, pin))
+        if want is not None:
+            if not same(o["cur"], want):
+                m = find_mode(o, want)
+                if m is None:
+                    # Settings offers sizes and refresh rates the GPU does
+                    # not list (a custom mode); put the chosen one back the
+                    # same way.
+                    args += ["--custom-mode", custom(want[0], want[1], want[2] or 60000)[3]]
+                else:
+                    args += ["--mode", m[3]]
+        elif use_randr and o["pref"]:
+            target = fit_mode(o)
+            if target is not None and not same(o["cur"], target):
+                args += ["--mode" if target in o["modes"] else "--custom-mode", target[3]]
+        tf = pinned("transform", name)
+        if tf and tf != o["transform"]:
+            args += ["--transform", tf]
+        if not args:
+            continue
+        if use_randr:
+            ok = call(["wlr-randr", "--output", name] + args)
+            if not ok and "--mode" in args and want is None:
+                # The virtual GPU refused it (a VM window on a large
+                # monitor offers modes it cannot then allocate): the next
+                # smaller offered mode, until one takes.
+                tried = args[args.index("--mode") + 1]
+                rest = [a for a in args if a not in ("--mode", tried)]
+                for m in smaller_modes(o, tried):
+                    if call(["wlr-randr", "--output", name, "--mode", m[3]] + rest):
+                        ok = True
+                        break
+            changed |= ok
+        else:
+            it = iter(args)
+            for k in it:
+                v = next(it)
+                call(["swaymsg", "output", name, k.lstrip("-"), v])
+            changed = True
+    if changed:
+        outs = outputs_wlr_randr() if use_randr else outputs_sway()
+    for o in outs:
+        name = o["name"]
+        if held(name):
+            continue
+        want = pinned("scale", name)
+        if want is None:
+            if pinned("mode", name):
+                continue            # a chosen mode keeps whatever scale it has
+            want = guess(o)
+        try:
+            if abs(float(want) - o["scale"]) < 0.01:
+                continue
+        except ValueError:
+            log(name, "ignoring unreadable scale-%s: %r" % (name, want))
+            continue
+        if use_randr:
+            call(["wlr-randr", "--output", name, "--scale", want])
+        else:
+            call(["swaymsg", "output", name, "scale", want])
+
+
+def fit_windows():
+    """Every floating window back inside its output (sway).
+
+    sway 1.7 keeps a floating window at its coordinates when the output
+    shrinks: after Settings or the VM window took the screen from 1920 to
+    1440 wide, a window placed for the old size reached past the edge,
+    its title bar buttons out of reach. A window larger than the output
+    is made to fit, then moved in by as little as it takes. wayfire keeps
+    its windows on the screen itself."""
+    if not os.environ.get("SWAYSOCK") or not shutil.which("swaymsg"):
+        return
+    time.sleep(0.3)
+    try:
+        tree = json.loads(run(["swaymsg", "-r", "-t", "get_tree"]) or "{}")
+    except ValueError:
+        return
+
+    def walk(node, out_rect):
+        if node.get("type") == "output":
+            out_rect = node.get("rect")
+        for f in node.get("floating_nodes", []):
+            yield f, out_rect
+        for n in node.get("nodes", []):
+            yield from walk(n, out_rect)
+
+    for con, o in walk(tree, None):
+        if not o or o.get("width", 0) <= 0:
+            continue
+        r = con.get("rect", {})
+        x, y, w, h = r.get("x", 0), r.get("y", 0), r.get("width", 0), r.get("height", 0)
+        ox, oy, ow, oh = o["x"], o["y"], o["width"], o["height"]
+        nw, nh = min(w, ow - 16), min(h, oh - 48)
+        cid = con.get("id")
+        if (nw, nh) != (w, h) and nw > 0 and nh > 0:
+            call(["swaymsg", "[con_id=%d] resize set %d %d" % (cid, nw, nh)])
+        nx = min(max(x, ox), ox + ow - nw)
+        ny = min(max(y, oy), oy + oh - nh)
+        if (nx, ny) != (x, y):
+            call(["swaymsg", "[con_id=%d] move absolute position %d %d" % (cid, nx, ny)])
+
+
+def compositor_socket():
+    """The compositor this process talks to, as the identity of its
+    Wayland socket file (device, inode), or None without one."""
+    wd = os.environ.get("WAYLAND_DISPLAY", "")
+    if not wd:
+        return None
+    path = wd if wd.startswith("/") else os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), wd)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return (st.st_dev, st.st_ino)
+
+
+def watch():
+    """Again on every change the kernel reports for the graphics card.
+    Kernel uevents need no privilege to read.
+
+    Only while the compositor it was started under lives. A watcher holds
+    no Wayland connection between changes, so nothing ends it when that
+    compositor goes, and the next compositor makes a socket of the same
+    name: the first-boot kiosk's watcher (lp-setup-gate) went on into the
+    desktop session, reading the kiosk's empty config, and on the first
+    change the VM window sent it put the preferred mode back over the one
+    chosen in Settings > Display. The socket's inode tells the two apart."""
+    mine = compositor_socket()
+    apply()
+    try:
+        p = subprocess.Popen(["udevadm", "monitor", "--kernel", "--subsystem-match=drm"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return
+    # And whenever wayfire.ini changes. wayfire re-reads it and applies
+    # each output's `mode` again - and it matches a mode by size first:
+    # 1920x1080@120000 on a screen that lists 1920x1080 at 60 and 75 is
+    # taken as 75. A refresh rate chosen in Settings that the screen does
+    # not list (a custom mode) went back to the listed one at the next
+    # save of any setting; it is put back here, as at every start.
+    ini = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                       os.path.expanduser("~/.config"), "wayfire.ini")
+
+    def ini_stamp():
+        try:
+            st = os.stat(ini)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    seen = ini_stamp()
+    while True:
+        ready, _, _ = select.select([p.stdout], [], [], 2.0)
+        if mine is not None and compositor_socket() != mine:
+            log("the compositor this watcher started under is gone; stopping")
+            p.terminate()
+            return
+        if ready:
+            # Straight from the pipe: a buffered readline() keeps the rest
+            # of what it read to itself, and select() would not wake for it.
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                return
+            if b" change " in chunk:
+                time.sleep(0.5)
+                apply()
+                fit_windows()
+            continue
+        now = ini_stamp()
+        if now != seen:
+            seen = now
+            time.sleep(1.0)        # wayfire applies it first
+            apply()
+
+
+if __name__ == "__main__":
+    if "--fit-windows" in sys.argv[1:]:
+        fit_windows()
+    elif "--watch" in sys.argv[1:]:
+        watch()
+    else:
+        apply()
+        fit_windows()

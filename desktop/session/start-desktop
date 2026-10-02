@@ -1,0 +1,233 @@
+#!/bin/sh
+# Bring the desktop up. /etc/rc runs this once the system is otherwise up.
+#
+# ── Why this does not run as root ──
+#
+# sway refuses to start as root, and it is right to: a compositor holds
+# every keystroke on the machine. So there is an ordinary account, uid
+# 1000, and dropprivs hands the session to it.
+#
+# What logind would normally do and nothing here does: hand that account
+# the graphics card and the input devices. There is no logind, so the
+# permissions are set here, once, on the devices that exist.
+mkdir -p /run/user/1000
+chown 1000:1000 /run/user/1000
+chmod 700 /run/user/1000
+mkdir -p /data/log
+# The devices go to uid 1000 - owner, read and write - and to their own
+# groups, never to everybody. They were once opened 0666: any account,
+# any daemon on the machine could then read every key typed, passwords
+# included. udev does the same for anything plugged in later
+# (/etc/udev/rules.d/71-lp-seat.rules); this covers what was there
+# before udev's rules existed, and an image made before them.
+seat_dev() {
+    for d in "$@"; do
+        test -c "$d" || continue
+        chown 1000 "$d" 2>/dev/null
+        chmod 0660 "$d" 2>/dev/null
+    done
+}
+seat_dev /dev/dri/card* /dev/dri/renderD*
+# Every event node, not the first six: the XPS has more input devices
+# than that (keyboard, touchpad, touchscreen, pen, lid, buttons, the
+# video bus), and the touchscreen was often past event5 - lp-osk could
+# then not see that the last touch came from a finger, and never showed.
+seat_dev /dev/input/event*
+# The virtual terminals are also given to uid 1000, not only opened to
+# everyone: libseat's built-in backend opens /dev/tty1 for its VT, and a
+# mode alone does not hold. init puts a root shell on tty1 at about the
+# moment the session starts, that shell reads Debian's /root/.profile,
+# and its `mesg n` takes the write bits from group and others - tty1
+# went 0666 -> 0644 a second after the chmod below, sway (uid 1000) then
+# failed "Could not open target tty: Permission denied" three times, and
+# an installed machine came up at a root prompt instead of the desktop.
+# `mesg` never touches the owner's bits, so owning the node survives it.
+chown 1000 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+chmod 0620 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+
+# The keyboard of the VT under the session is switched off here, and
+# the VT put in graphics mode - the two things libseat's built-in
+# backend tries to do itself and cannot: the kernel lets only root, or a
+# process whose controlling terminal the VT is, change them, and the
+# session is neither ("Could not set KD keyboard mode to disabled:
+# Operation not permitted" in session.log). Left alone, the VT's
+# keyboard stays in unicode mode, and every key typed anywhere on the
+# desktop is also typed into the VT - where init runs /bin/login on an
+# installed machine (/etc/lp/console-login), the VT the session draws
+# on. The password typed at the lock screen became a login name on
+# tty1, in clear text on its screen, and each line after it one more
+# login attempt. (K_OFF also keeps the kernel from switching VTs on
+# Ctrl+Alt+Fn by itself, behind the compositor's back.) When the
+# session gives up (below), the VT gets its keyboard back, so that
+# login can be used after all.
+vt_keyboard() {
+    test -x /usr/bin/python3 || return 0
+    /usr/bin/python3 - "$1" <<'PY' 2>/dev/null
+import fcntl, os, sys
+KDSETMODE, KDSKBMODE = 0x4B3A, 0x4B45
+K_UNICODE, K_OFF, KD_TEXT, KD_GRAPHICS = 3, 4, 0, 1
+vt = open("/sys/class/tty/tty0/active").read().strip()
+fd = os.open("/dev/" + vt, os.O_RDWR | os.O_NOCTTY)
+if sys.argv[1] == "off":
+    fcntl.ioctl(fd, KDSKBMODE, K_OFF)
+    fcntl.ioctl(fd, KDSETMODE, KD_GRAPHICS)
+else:
+    fcntl.ioctl(fd, KDSETMODE, KD_TEXT)
+    fcntl.ioctl(fd, KDSKBMODE, K_UNICODE)
+PY
+}
+vt_keyboard off
+
+# 소리.
+#
+# udev 가 /dev/snd/* 를 audio 그룹 소유로 만들고, uid 1000 은 그
+# 그룹에 없다. 그래서 pipewire 는 뜨지만 카드를 열지 못하고, 결국
+# sink 가 하나도 없는 채로 남는다 - 퀵메뉴에는 "소리 장치가 없습니다"
+# 라고 나오고, 소리 장치는 멀쩡히 있다.
+#
+# 그룹에만 기대지 않고 노드의 주인을 uid 1000 으로 하는 이유는,
+# 여기에 logind 가 없어서 그룹 소속이 세션마다 갱신되지 않기
+# 때문이다. 모두에게 여는 것(0666)은 하지 않는다 - 다른 계정이 마이크를
+# 열 수 있게 된다.
+seat_dev /dev/snd/*
+
+# Which compositor: wayfire where there is 3D graphics, sway where
+# there is not.
+#
+# wayfire draws the window frames - title, minimise, maximise, close -
+# and the animations, and it draws everything with OpenGL. Without a
+# GPU that is Mesa's software path (kms_swrast), and on a virtual
+# graphics card with no 3D (QEMU's virtio-vga, UTM's default) wlroots'
+# GL renderer dies on the first frame there: tested, wayfire and sway
+# both. sway can instead draw on the CPU (pixman), so it is the one
+# that runs there; its windows draw their own frames (foot and GTK
+# apps do, see foot.ini and sway.config).
+#
+# The decision needs dmesg, which only root may read, so it is made
+# here and handed to the session in a file (setpriv --reset-env clears
+# the environment). session-run still falls back to sway if wayfire
+# dies at the start anyway, so a wrong guess costs seconds, not the
+# desktop. /etc/lp/compositor (wayfire, sway or auto) overrides it.
+mkdir -p /run/lp-session
+comp=sway
+why="no 3D graphics found"
+for card in /sys/class/drm/card[0-9]*; do
+    test -e "$card/device/driver" || continue
+    drv=$(basename "$(readlink -f "$card/device/driver")")
+    case $drv in
+        # xe: Intel's driver for Lunar Lake and the Arc B-series, which
+        # i915 does not drive. Its OpenGL is Mesa 25's, from backports
+        # (tools/apply-packages.sh); bookworm's Mesa 22.3 had none.
+        i915|xe|amdgpu|radeon|nouveau|vmwgfx)
+            comp=wayfire; why="$drv"; break ;;
+        virtio_gpu|virtio-pci|virtio_pci)
+            # virtio-gpu has 3D only when the host gave it virgl (UTM: a
+            # "GPU Supported" display; QEMU/KVM: virtio-vga-gl, virt-manager's
+            # "3D acceleration"). Then wayfire, with its animations, as on
+            # real hardware - under KVM too: for a while KVM got sway here,
+            # because the pointer trailed the hand and the screen flickered
+            # where it moved; the pointer is now on the GPU's cursor plane
+            # and drawn by the host (session-run), which is what that was.
+            if dmesg 2>/dev/null | grep -q 'features: +virgl'; then
+                comp=wayfire; why="virtio-gpu with virgl"; break
+            fi
+            why="virtio-gpu without 3D (virgl)" ;;
+        *)  why="$drv: no 3D" ;;
+    esac
+done
+if test -s /etc/lp/compositor; then
+    read -r want < /etc/lp/compositor
+    case $want in
+        # The card stays in the reason: session-run reads "virtio" there.
+        wayfire|sway) comp=$want; why="/etc/lp/compositor ($why)" ;;
+    esac
+fi
+
+# Safe mode: sway drawing on the CPU (pixman), whatever the card and
+# whatever anybody chose - the way out of a desktop that hangs or dies in
+# the graphics driver, as Windows' safe mode is. Asked for with `sudo
+# lp-safe-mode` (the next boot only) or lp.safe=1 on the kernel's command
+# line; also taken by itself below when the desktop has died three times
+# in a row at the start.
+rm -f /run/lp-session/safe
+if grep -qw 'lp.safe=1' /proc/cmdline 2>/dev/null || test -e /etc/lp/safe-mode-next; then
+    rm -f /etc/lp/safe-mode-next
+    comp=sway; why="safe mode (asked for)"
+    echo asked > /run/lp-session/safe
+fi
+write_compositor() {
+    printf '%s\n%s\n' "$comp" "$why" > /run/lp-session/compositor
+    chmod 644 /run/lp-session/compositor
+}
+write_compositor
+
+# The desktop account is whoever has uid 1000: "user" in the image as
+# built, the name the person chose once the installer has run (it keeps
+# /home/user as a link to the real home, for scripts written against the
+# old name).
+LP_HOME=$(awk -F: '$3 == 1000 { print $6; exit }' /etc/passwd)
+test -n "$LP_HOME" || LP_HOME=/home/user
+
+# 홈이 root 소유로 남아 있으면 세션이 설정 하나 저장하지 못한다.
+# 이미지를 만들 때 맞춰 두지만, 첫 부팅에서 expandfs 가 파티션을
+# 늘리고 나면 새로 생기는 것들이 있어 여기서 한 번 더 맞춘다.
+chown -R 1000:1000 "$LP_HOME/" 2>/dev/null
+
+# The session gets the account's groups - sudo, audio, video, ... - the
+# way a login would. dropprivs clears them (right for a network daemon,
+# wrong for a person): with only its own group the person was not in
+# sudo, so sudo refused them with their own password, and every other
+# group the installer gave them counted for nothing. setpriv
+# --init-groups reads /etc/group exactly as login does.
+#
+# The session runs again when it ends: after a logout (lp-logout), which
+# brings it back locked, and after a crash of the compositor, which
+# should not leave the machine at a black screen. Three quick deaths in
+# a row (under 30 s each) is a session that cannot start; it is left
+# down then, and /data/log/session.log has what it printed.
+run_session() {
+    if test -x /usr/bin/setpriv; then
+        /usr/bin/setpriv --reuid=1000 --regid=1000 --init-groups \
+            --reset-env /bin/session-run
+    else
+        dropprivs 1000:1000 /bin/session-run
+    fi
+}
+# The boot screen (/bin/splash: the PC maker's logo, ours under it and a
+# spinner) holds until it is told the desktop is coming; told here, just
+# before the compositor takes the screen. It returns once the splash has
+# stopped drawing, leaving its last frame up for the compositor to replace.
+test -x /bin/splash && /bin/splash stop
+
+quick=0
+while :; do
+    read -r t0 _ < /proc/uptime
+    run_session >> /data/log/session.log 2>&1
+    read -r t1 _ < /proc/uptime
+    if test -e /run/user/1000/lp-logout; then
+        quick=0
+        continue
+    fi
+    if test $(( ${t1%.*} - ${t0%.*} )) -lt 30; then
+        quick=$((quick + 1))
+    else
+        quick=0
+    fi
+    if test $quick -ge 3; then
+        # Three quick deaths: first try once more in safe mode (a driver
+        # or a 3D path that kills the compositor is the usual cause), and
+        # only give up when that dies too.
+        if ! test -e /run/lp-session/safe; then
+            echo "start-desktop: the session ended three times within 30 s; starting it in safe mode" >> /data/log/session.log
+            comp=sway; why="safe mode (the desktop failed to start three times)"
+            echo auto > /run/lp-session/safe
+            write_compositor
+            quick=0
+            continue
+        fi
+        echo "start-desktop: the session ended three times within 30 s; not starting it again" >> /data/log/session.log
+        vt_keyboard on
+        exit 1
+    fi
+    sleep 1
+done

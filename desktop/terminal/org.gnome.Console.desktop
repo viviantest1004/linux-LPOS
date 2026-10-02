@@ -1,0 +1,22 @@
+[Desktop Entry]
+# Console's own entry, renamed like foot's was: the top bar and the app
+# grid show an app by its Name, and "Terminal" is what somebody looks for.
+# Console (kgx, GTK 4) is the terminal because its window has the same
+# title bar and the same three buttons as every other window; foot asked
+# the compositor for a frame, which under sway has no buttons at all.
+# Installed to /usr/local/share/applications, ahead of /usr/share.
+Type=Application
+Name=Terminal
+Name[ko]=터미널
+GenericName=Terminal
+GenericName[ko]=터미널
+Comment=Use the command line
+Comment[ko]=명령줄을 씁니다
+Exec=kgx
+Icon=utilities-terminal
+Terminal=false
+Categories=GTK;GNOME;System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;cmd;foot;
+StartupNotify=true
+DBusActivatable=false
+X-GNOME-UsesNotifications=true

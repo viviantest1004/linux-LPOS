@@ -1,0 +1,13 @@
+# authorized_keys - the SSH public keys allowed to log in.
+#
+# *** Paste your own public key here, on one line, or you cannot log in. ***
+#
+# To make one, on the PC you will connect from:
+#     ssh-keygen -t ed25519 -f ~/.ssh/lpzero
+#     cat ~/.ssh/lpzero.pub        <- paste that single line below
+#
+# Then connect with:
+#     ssh -i ~/.ssh/lpzero root@<the address it got>
+#
+# Password authentication was left out at build time. On a machine
+# exposed to a network, a password is just a target for brute force.

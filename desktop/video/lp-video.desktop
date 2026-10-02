@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Videos
+Name[ko]=동영상
+GenericName=Video Player
+GenericName[ko]=동영상 플레이어
+Comment=Play videos and music, trim and convert clips
+Comment[ko]=동영상과 음악을 재생하고, 잘라 내거나 변환합니다
+Exec=lp-video %U
+Icon=multimedia-video-player
+Terminal=false
+Categories=AudioVideo;Video;Player;GTK;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/ogg;video/3gpp;audio/mpeg;audio/ogg;audio/flac;audio/wav;audio/x-wav;audio/mp4;audio/aac;
+Keywords=video;movie;player;trim;cut;gif;music;audio;
+Keywords[ko]=동영상;비디오;영화;플레이어;자르기;편집;움짤;음악;
+StartupNotify=true
+StartupWMClass=org.lpzero.Video

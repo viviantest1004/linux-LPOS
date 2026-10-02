@@ -1,0 +1,14 @@
+# /etc/hosts - names this machine resolves without asking anyone.
+#
+# localhost has to be here. Nothing looks it up over DNS - it is
+# expected to be answered locally, and a great deal of software binds or
+# connects to it by name rather than by address. Without this file,
+# python's http.server, a client connecting to "localhost", and half the
+# examples in every tutorial all fail with a name resolution error on a
+# machine whose network is working perfectly.
+127.0.0.1       localhost
+::1             localhost ip6-localhost ip6-loopback
+
+# The machine's own name, so that programs which look it up get an
+# answer rather than a lookup that goes out to the network and fails.
+127.0.1.1       lpzero

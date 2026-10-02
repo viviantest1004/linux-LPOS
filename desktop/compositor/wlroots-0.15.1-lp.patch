@@ -1,0 +1,677 @@
+From: LP desktop <lp@localhost>
+Subject: [PATCH] backend/drm: virtio-gpu cursor plane (cursor hotspots), clip FB_DAMAGE_CLIPS
+
+Applies to Debian's wlroots 0.15.1-6, after debian/patches/series.
+Built by build-wlroots.sh; see README-wlroots.md.
+
+1. Cursor hotspots - backport of upstream e3bd3185 "drm/backend: add
+   support for cursor hotspots" (wlroots 0.18, Ian Forbes).
+   Linux 6.8+ hides the cursor plane of virtualized drivers (virtio-gpu,
+   vmwgfx, qxl, vboxvideo) from atomic clients that have not set
+   DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, because the host needs the
+   hotspot to line its own pointer up with the guest's. Without the
+   plane, output_pick_cursor_format() logs "Failed to get cursor display
+   formats" and every pointer motion is a software-cursor frame.
+   - drm.c: set the cap right after DRM_CLIENT_CAP_ATOMIC (before the
+     planes are enumerated); atomic only - the legacy path is untouched.
+     OFF unless WLR_DRM_CURSOR_HOTSPOT=1: under UTM (QEMU, x86_64
+     emulation, virtio-gpu) the host-drawn cursor came out garbled and
+     mirrored, and the host pointer it warped to follow the plane fed
+     back into the guest's absolute pointer - the pointer moved by itself
+     and clicks landed elsewhere. The software cursor is the safe default
+     in a VM; real GPUs expose their cursor plane without the cap.
+     The define is missing from libdrm < 2.4.118 (bookworm has 2.4.114),
+     so it is provided (value 6, include/uapi/drm/drm.h).
+   - properties.[ch]: HOTSPOT_X / HOTSPOT_Y in the plane property table
+     (the table is bsearch()ed; it stays sorted).
+   - atomic.c: when the cursor plane has both properties, set them from
+     the connector's cursor hotspot. CRTC_X/Y are unchanged: the pointer
+     position minus the hotspot, i.e. the image's top-left corner.
+
+2. FB_DAMAGE_CLIPS - 0.15.1 already sends the frame's damage (upstream
+   added it in 0.15), but unclipped. Backport of upstream 4339c37f
+   "backend/drm: clip FB damage" (0.17) and e8e76dc2 "backend/drm: check
+   whether clipped damage is empty" (0.19): the kernel rejects the whole
+   atomic commit with EINVAL ("invalid damage clip") when a clip exceeds
+   the FB, so the damage is intersected with the primary FB's bounds and
+   no blob is sent when nothing is left. The blob is still created per
+   commit (test and real) and destroyed after it.
+
+3. The pixman renderer also offers DRM_FORMAT_MOD_LINEAR (upstream does
+   from 0.16). The DRM backend gives a cursor plane of a driver without
+   modifiers LINEAR only; pixman offered INVALID only, the intersection
+   was empty, and even with the plane back the cursor stayed software
+   ("Failed to pick cursor format"). Dumb buffers are linear anyway.
+
+4. A DRM dumb buffer allocated for a LINEAR-only format reports LINEAR,
+   not INVALID: the DRM backend checks the buffer's modifier against the
+   plane's formats, and the cursor plane (LINEAR only) refused it ("cannot
+   be scanned out"), falling back to software again.
+
+5. Single-buffered output swapchain on virtual GPUs (LP-only, not
+   upstream). The swapchain alternated two dumb buffers, so every commit
+   carried a new FB, and virtio-gpu (Linux 6.8+, virtgpu_plane.c) ignores
+   FB_DAMAGE_CLIPS when the FB changes: each frame - with the software
+   cursor, each pointer motion - was a full-screen TRANSFER_TO_HOST_2D +
+   RESOURCE_FLUSH (8 MB at 1080p), which under TCG stalls QEMU's main
+   thread. For DRM outputs on virtio_gpu, vmwgfx, qxl and cirrus (by
+   drmGetVersion name) drawn into dumb buffers (the pixman renderer's DRM
+   dumb allocator; WLR_DRM_SINGLE_BUFFER=1/0 forces it) the swapchain
+   hands out the last submitted buffer again (age 1) even while it is the
+   plane's current FB, so the FB stays the same and only the damage is
+   uploaded. These drivers scan out a host-side copy, refreshed from the
+   dumb buffer on commit, so drawing into the committed buffer between
+   commits does not show. It needs a kernel that honours the damage clips
+   of a commit whose FB did not change: Linux 6.12 kept ignoring them
+   after the first FB change (LP's kernel/patches/0001-drm-clear-
+   ignore_damage_clips-on-duplicate.patch). GLES2 on virgl (GBM buffers:
+   the host displays the rendered resource itself, there is no copy),
+   real GPUs and bochs-drm (scanout from VRAM, the flip is free) keep
+   double buffering.
+
+6. One pixel of damage for a commit that changed nothing (LP-only,
+   WLR_DRM_MIN_DAMAGE=1). Moving a hardware cursor is an atomic commit
+   that also carries the primary plane with its unchanged FB and no
+   damage, and a plane update without FB_DAMAGE_CLIPS is a full update to
+   the kernel: virtio-gpu uploaded and flushed the whole screen for each
+   pointer motion, so the cursor plane saved nothing. Such a commit now
+   says (0,0)-(1,1), a pixel that is already on the screen. Only asked
+   for on virtual GPUs whose FB stays the same (single buffer, 5.): a
+   commit with a new FB is a full upload there regardless.
+
+7. A cursor image drawn upside down on purpose (LP-only,
+   WLR_DRM_CURSOR_FLIP_Y=1). Through virgl the host reads the cursor
+   plane's buffer back with virglrenderer, which flips every image it
+   reads (it takes a GL texture's bottom-up rows for granted); one that
+   wayfire drew with OpenGL showed the pointer upside down at the bottom
+   of its 64x64 square. The whole buffer is drawn flipped vertically, so
+   the host's flip puts it back, hotspot and all. pixman's cursors
+   (sway) arrive upright and are left alone.
+
+8. The cursor plane moved by itself (LP-only, WLR_DRM_CURSOR_DIRECT=1).
+   0.15 moves the cursor plane in the next frame, and asks the
+   compositor for one; wayfire then renders a whole new frame into its
+   other buffer, and on virtio-gpu every motion of the mouse was a flush
+   of the whole screen for the host to redraw. With the variable set, a
+   pointer motion is an atomic commit of the cursor plane's CRTC_X/Y
+   alone (nonblocking, no event); when the plane is not up or a page flip
+   is pending, the frame is asked for as before.
+
+9. Frame events paced to the refresh rate on GPUs without vblank
+   (LP-only; WLR_DRM_FRAME_PACE=1/0 forces it on/off). virtio-gpu, qxl,
+   bochs, cirrus, vmwgfx, vboxvideo, hyperv_drm and simpledrm complete a
+   page flip as soon as the commit is queued for the host, so the frame
+   event after it came at once, and a compositor with anything moving
+   drew as fast as the CPU allowed: hundreds of frames a second queued up
+   for a host that shows sixty, the compositor blocked on the full queue
+   and not reading input meanwhile. Under KVM with SPICE and OpenGL that
+   was flicker, and a pointer, clicks and new windows that lagged behind.
+   drm.c holds the next frame event until one refresh period (the mode's;
+   60 Hz without one) after the previous one, as mutter's frame clock
+   does. A real GPU's flip completes at vblank and never waits there.
+
+---
+diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
+--- a/backend/drm/atomic.c
++++ b/backend/drm/atomic.c
+@@ -1,4 +1,5 @@
+ #include <stdlib.h>
++#include <string.h>
+ #include <wlr/util/log.h>
+ #include <xf86drm.h>
+ #include <xf86drmMode.h>
+@@ -103,6 +104,39 @@
+ 	return true;
+ }
+ 
++static bool create_fb_damage_clips_blob(struct wlr_drm_backend *drm,
++		struct wlr_drm_fb *fb, const pixman_region32_t *damage,
++		uint32_t *blob_id) {
++	*blob_id = 0;
++	if (fb == NULL) {
++		return true;
++	}
++
++	// The kernel rejects the whole commit (EINVAL) if a clip exceeds the FB,
++	// so clip the damage (buffer-local coordinates) to the FB bounds.
++	pixman_region32_t clipped;
++	pixman_region32_init(&clipped);
++	pixman_region32_intersect_rect(&clipped, (pixman_region32_t *)damage,
++		0, 0, fb->wlr_buf->width, fb->wlr_buf->height);
++
++	int rects_len;
++	const pixman_box32_t *rects = pixman_region32_rectangles(&clipped, &rects_len);
++
++	int ret = 0;
++	if (rects_len > 0) {
++		ret = drmModeCreatePropertyBlob(drm->fd, rects,
++			sizeof(*rects) * rects_len, blob_id);
++	}
++	pixman_region32_fini(&clipped);
++	if (ret != 0) {
++		wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
++		*blob_id = 0;
++		return false;
++	}
++
++	return true;
++}
++
+ static void commit_blob(struct wlr_drm_backend *drm,
+ 		uint32_t *current, uint32_t next) {
+ 	if (*current == next) {
+@@ -163,6 +197,19 @@
+ 	atom->failed = true;
+ }
+ 
++static bool want_min_damage(void) {
++	static int want = -1;
++	if (want < 0) {
++		const char *env = getenv("WLR_DRM_MIN_DAMAGE");
++		want = env != NULL && strcmp(env, "1") == 0;
++	}
++	return want;
++}
++
++static bool supports_cursor_hotspots(const struct wlr_drm_plane *plane) {
++	return plane->props.hotspot_x && plane->props.hotspot_y;
++}
++
+ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
+ 		const struct wlr_drm_connector_state *state, uint32_t flags,
+ 		bool test_only) {
+@@ -201,14 +248,24 @@
+ 
+ 	uint32_t fb_damage_clips = 0;
+ 	if ((state->base->committed & WLR_OUTPUT_STATE_DAMAGE) &&
+-			pixman_region32_not_empty((pixman_region32_t *)&state->base->damage) &&
+ 			crtc->primary->props.fb_damage_clips != 0) {
+-		int rects_len;
+-		const pixman_box32_t *rects = pixman_region32_rectangles(
+-			(pixman_region32_t *)&state->base->damage, &rects_len);
+-		if (drmModeCreatePropertyBlob(drm->fd, rects,
+-				sizeof(*rects) * rects_len, &fb_damage_clips) != 0) {
++		create_fb_damage_clips_blob(drm, plane_get_next_fb(crtc->primary),
++			&state->base->damage, &fb_damage_clips);
++	}
++	// LP: a commit that changes nothing on the primary plane - the cursor
++	// plane moved, nothing else - carries no damage, and no FB_DAMAGE_CLIPS
++	// means "all of it" to the kernel: virtio-gpu then uploads and flushes
++	// the whole screen for every pointer motion. With WLR_DRM_MIN_DAMAGE=1
++	// such a commit says one pixel instead (still drawn, so resending it
++	// changes nothing on the screen).
++	if (fb_damage_clips == 0 && active && want_min_damage() &&
++			crtc->primary->props.fb_damage_clips != 0 &&
++			plane_get_next_fb(crtc->primary) != NULL) {
++		pixman_box32_t one = { .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 1 };
++		if (drmModeCreatePropertyBlob(drm->fd, &one, sizeof(one),
++				&fb_damage_clips) != 0) {
+ 			wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
++			fb_damage_clips = 0;
+ 		}
+ 	}
+ 
+@@ -254,6 +311,15 @@
+ 			if (drm_connector_is_cursor_visible(conn)) {
+ 				set_plane_props(&atom, drm, crtc->cursor, crtc->id,
+ 					conn->cursor_x, conn->cursor_y);
++				// CRTC_X/Y stay the top-left corner of the cursor image
++				// (pointer position minus hotspot); HOTSPOT_X/Y tell a
++				// virtualized driver where the pointer is inside it.
++				if (supports_cursor_hotspots(crtc->cursor)) {
++					atomic_add(&atom, crtc->cursor->id,
++						crtc->cursor->props.hotspot_x, conn->cursor_hotspot_x);
++					atomic_add(&atom, crtc->cursor->id,
++						crtc->cursor->props.hotspot_y, conn->cursor_hotspot_y);
++				}
+ 			} else {
+ 				plane_disable(&atom, crtc->cursor);
+ 			}
+diff --git a/backend/drm/drm.c b/backend/drm/drm.c
+--- a/backend/drm/drm.c
++++ b/backend/drm/drm.c
+@@ -31,6 +31,11 @@
+ #include "render/wlr_renderer.h"
+ #include "util/signal.h"
+ 
++#ifndef DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT
++// Linux 6.8+ (include/uapi/drm/drm.h); libdrm < 2.4.118 lacks the define
++#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
++#endif
++
+ static const uint32_t SUPPORTED_OUTPUT_STATE =
+ 	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
+ 	WLR_OUTPUT_STATE_BUFFER |
+@@ -85,6 +90,18 @@
+ 		wlr_log(WLR_DEBUG, "Using atomic DRM interface");
+ 		drm->iface = &atomic_iface;
+ 	}
++	// Virtualized drivers (virtio-gpu, vmwgfx, qxl, vboxvideo) hide their
++	// cursor plane from atomic clients that don't promise to set the cursor
++	// hotspot (Linux 6.8+). LP asks for it only with WLR_DRM_CURSOR_HOTSPOT=1:
++	// under UTM the host drew the plane's cursor garbled, and the host
++	// pointer it moved to match fed back into the guest's, so the pointer
++	// wandered by itself and clicks missed. Without the cap the cursor is
++	// software-drawn, as before. Must happen before the planes are enumerated.
++	const char *hotspot = getenv("WLR_DRM_CURSOR_HOTSPOT");
++	if (hotspot && strcmp(hotspot, "1") == 0 && drm->iface == &atomic_iface &&
++			drmSetClientCap(drm->fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1) == 0) {
++		wlr_log(WLR_INFO, "DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT supported");
++	}
+ 
+ 	int ret = drmGetCap(drm->fd, DRM_CAP_TIMESTAMP_MONOTONIC, &cap);
+ 	drm->clock = (ret == 0 && cap == 1) ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+@@ -841,6 +858,42 @@
+ 	return true;
+ }
+ 
++/*
++ * LP: WLR_DRM_CURSOR_DIRECT=1 - move the cursor plane on its own, with a
++ * commit of nothing else. Otherwise a pointer motion asks the compositor
++ * for a frame, and wayfire answers with a whole new frame in its other
++ * buffer: on virtio-gpu that is a flush of the whole screen for every
++ * motion of the mouse, which the host (virt-manager's SPICE with OpenGL)
++ * redraws - where GNOME's pointer sends nothing but the cursor's place.
++ * When the plane is not up, or a page flip is still pending (EBUSY), the
++ * frame is asked for as before, and it carries the position.
++ */
++static bool move_cursor_plane_now(struct wlr_drm_connector *conn) {
++	static int want = -1;
++	if (want < 0) {
++		const char *env = getenv("WLR_DRM_CURSOR_DIRECT");
++		want = env != NULL && strcmp(env, "1") == 0;
++	}
++	struct wlr_drm_backend *drm = conn->backend;
++	struct wlr_drm_plane *plane = conn->crtc ? conn->crtc->cursor : NULL;
++	if (!want || drm->iface != &atomic_iface || plane == NULL ||
++			plane->current_fb == NULL || plane->props.crtc_x == 0 ||
++			plane->props.crtc_y == 0 || !drm_connector_is_cursor_visible(conn)) {
++		return false;
++	}
++	drmModeAtomicReq *req = drmModeAtomicAlloc();
++	if (req == NULL) {
++		return false;
++	}
++	bool ok = drmModeAtomicAddProperty(req, plane->id, plane->props.crtc_x,
++			(uint64_t)(int64_t)conn->cursor_x) >= 0 &&
++		drmModeAtomicAddProperty(req, plane->id, plane->props.crtc_y,
++			(uint64_t)(int64_t)conn->cursor_y) >= 0 &&
++		drmModeAtomicCommit(drm->fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL) == 0;
++	drmModeAtomicFree(req);
++	return ok;
++}
++
+ static bool drm_connector_move_cursor(struct wlr_output *output,
+ 		int x, int y) {
+ 	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
+@@ -867,6 +920,9 @@
+ 	conn->cursor_x = box.x;
+ 	conn->cursor_y = box.y;
+ 
++	if (move_cursor_plane_now(conn)) {
++		return true;
++	}
+ 	wlr_output_update_needs_frame(output);
+ 	return true;
+ }
+@@ -1449,6 +1505,92 @@
+ 	return 1000000000000LL / mhz;
+ }
+ 
++/*
++ * LP: frame events at most once a refresh period on GPUs without vblank.
++ *
++ * virtio-gpu (and the other virtual GPUs below) have no vblank: the
++ * kernel sends the page-flip event as soon as the commit has been queued
++ * for the host, not when the host has shown it. The frame event that
++ * follows it then came at once, and a compositor with anything moving -
++ * an animation, a window being dragged, the pointer drawn in software -
++ * drew as fast as the CPU could: hundreds of frames a second that the
++ * host could not show, queued behind each other in the virtqueue, the
++ * compositor blocked on a full queue and not reading input meanwhile.
++ * Under KVM with SPICE and OpenGL that was the screen flickering, and the
++ * pointer, clicks and new windows all lagging behind. mutter paces its
++ * frames with its own clock at the mode's refresh rate; this does the
++ * same here: the next frame event is held until one refresh period after
++ * the previous one. A real GPU's flip completes at vblank, so it never
++ * waits here. WLR_DRM_FRAME_PACE=1/0 forces it on/off.
++ */
++static bool want_frame_pacing(struct wlr_drm_backend *drm) {
++	if (drm->frame_pace == 0) {
++		drm->frame_pace = 1;
++		const char *env = getenv("WLR_DRM_FRAME_PACE");
++		if (env != NULL && env[0] != '\0') {
++			drm->frame_pace = strcmp(env, "1") == 0 ? 2 : 1;
++		} else {
++			static const char *const virtual_gpus[] = {
++				"virtio_gpu", "qxl", "bochs-drm", "bochs", "cirrus",
++				"cirrus-qemu", "vmwgfx", "vboxvideo", "hyperv_drm",
++				"simpledrm", NULL,
++			};
++			drmVersion *version = drmGetVersion(drm->fd);
++			for (size_t i = 0; version != NULL && virtual_gpus[i] != NULL; i++) {
++				if (strcmp(version->name, virtual_gpus[i]) == 0) {
++					drm->frame_pace = 2;
++				}
++			}
++			drmFreeVersion(version);
++		}
++		if (drm->frame_pace == 2) {
++			wlr_log(WLR_INFO, "Frame events paced to the refresh rate");
++		}
++	}
++	return drm->frame_pace == 2;
++}
++
++static int handle_frame_pace_timer(void *data) {
++	struct wlr_drm_connector *conn = data;
++	clock_gettime(CLOCK_MONOTONIC, &conn->last_frame);
++	if (conn->backend->session->active &&
++			conn->status == WLR_DRM_CONN_CONNECTED && conn->crtc != NULL) {
++		wlr_output_send_frame(&conn->output);
++	}
++	return 0;
++}
++
++static void send_frame(struct wlr_drm_connector *conn) {
++	struct wlr_drm_backend *drm = conn->backend;
++	if (!want_frame_pacing(drm)) {
++		wlr_output_send_frame(&conn->output);
++		return;
++	}
++	int refresh = conn->output.refresh > 0 ? conn->output.refresh : 60000;
++	int64_t period = 1000000000000LL / refresh;
++	struct timespec now;
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	int64_t since = (int64_t)(now.tv_sec - conn->last_frame.tv_sec) * 1000000000LL +
++		(now.tv_nsec - conn->last_frame.tv_nsec);
++	if (since >= period) {
++		conn->last_frame = now;
++		wlr_output_send_frame(&conn->output);
++		return;
++	}
++	if (conn->frame_pace_timer == NULL) {
++		conn->frame_pace_timer = wl_event_loop_add_timer(
++			wl_display_get_event_loop(drm->display),
++			handle_frame_pace_timer, conn);
++		if (conn->frame_pace_timer == NULL) {
++			conn->last_frame = now;
++			wlr_output_send_frame(&conn->output);
++			return;
++		}
++	}
++	int ms = (int)((period - since + 999999) / 1000000);
++	wl_event_source_timer_update(conn->frame_pace_timer, ms > 0 ? ms : 1);
++}
++
+ static void handle_page_flip(int fd, unsigned seq,
+ 		unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void *data) {
+ 	struct wlr_drm_backend *drm = data;
+@@ -1511,7 +1653,7 @@
+ 	wlr_output_send_present(&conn->output, &present_event);
+ 
+ 	if (drm->session->active) {
+-		wlr_output_send_frame(&conn->output);
++		send_frame(conn);
+ 	}
+ }
+ 
+@@ -1544,6 +1686,9 @@
+ 
+ void destroy_drm_connector(struct wlr_drm_connector *conn) {
+ 	disconnect_drm_connector(conn);
++	if (conn->frame_pace_timer != NULL) {
++		wl_event_source_remove(conn->frame_pace_timer);
++	}
+ 
+ 	wl_list_remove(&conn->link);
+ 	free(conn);
+diff --git a/include/backend/drm/drm.h b/include/backend/drm/drm.h
+--- a/include/backend/drm/drm.h
++++ b/include/backend/drm/drm.h
+@@ -87,6 +87,10 @@
+ 	uint64_t cursor_width, cursor_height;
+ 
+ 	struct wlr_drm_format_set mgpu_formats;
++
++	/* LP: frame events paced to the refresh rate (drm.c, send_frame):
++	 * 0 not decided yet, 1 no, 2 yes. */
++	int frame_pace;
+ };
+ 
+ enum wlr_drm_connector_status {
+@@ -140,6 +144,11 @@
+ 	 * they're sent.
+ 	 */
+ 	uint32_t pending_page_flip_crtc;
++
++	/* LP: when the last frame event went out, and the timer that holds
++	 * the next one back until a refresh period has passed. */
++	struct timespec last_frame;
++	struct wl_event_source *frame_pace_timer;
+ };
+ 
+ struct wlr_drm_backend *get_drm_backend_from_backend(
+diff --git a/backend/drm/properties.c b/backend/drm/properties.c
+--- a/backend/drm/properties.c
++++ b/backend/drm/properties.c
+@@ -51,6 +51,8 @@
+ 	{ "CRTC_Y", INDEX(crtc_y) },
+ 	{ "FB_DAMAGE_CLIPS", INDEX(fb_damage_clips) },
+ 	{ "FB_ID", INDEX(fb_id) },
++	{ "HOTSPOT_X", INDEX(hotspot_x) },
++	{ "HOTSPOT_Y", INDEX(hotspot_y) },
+ 	{ "IN_FORMATS", INDEX(in_formats) },
+ 	{ "SRC_H", INDEX(src_h) },
+ 	{ "SRC_W", INDEX(src_w) },
+diff --git a/include/backend/drm/properties.h b/include/backend/drm/properties.h
+--- a/include/backend/drm/properties.h
++++ b/include/backend/drm/properties.h
+@@ -62,8 +62,10 @@
+ 		uint32_t fb_id;
+ 		uint32_t crtc_id;
+ 		uint32_t fb_damage_clips;
++		uint32_t hotspot_x; // only on virtualized drivers' cursor planes
++		uint32_t hotspot_y;
+ 	};
+-	uint32_t props[14];
++	uint32_t props[16];
+ };
+ 
+ bool get_drm_connector_props(int fd, uint32_t id,
+diff --git a/render/pixman/renderer.c b/render/pixman/renderer.c
+--- a/render/pixman/renderer.c
++++ b/render/pixman/renderer.c
+@@ -529,6 +529,13 @@
+ 	for (size_t i = 0; i < len; ++i) {
+ 		wlr_drm_format_set_add(&renderer->drm_formats, formats[i],
+ 				DRM_FORMAT_MOD_INVALID);
++		// Everything pixman draws into is linear (dumb buffers, shm). Saying
++		// so is what lets a cursor plane that takes LINEAR only - every
++		// driver without modifiers, see backend/drm/drm.c add_plane() - get
++		// a buffer: with INVALID alone the intersection was empty, "Failed
++		// to pick cursor format", and the cursor stayed a software one.
++		wlr_drm_format_set_add(&renderer->drm_formats, formats[i],
++				DRM_FORMAT_MOD_LINEAR);
+ 	}
+ 
+ 	return &renderer->wlr_renderer;
+diff --git a/render/allocator/drm_dumb.c b/render/allocator/drm_dumb.c
+--- a/render/allocator/drm_dumb.c
++++ b/render/allocator/drm_dumb.c
+@@ -16,6 +16,7 @@
+ #include <xf86drmMode.h>
+ 
+ #include "render/allocator/drm_dumb.h"
++#include "render/drm_format_set.h"
+ #include "render/pixel_format.h"
+ 
+ static const struct wlr_buffer_impl buffer_impl;
+@@ -110,7 +111,12 @@
+ 		.width = buffer->width,
+ 		.height = buffer->height,
+ 		.format = format->format,
+-		.modifier = DRM_FORMAT_MOD_INVALID,
++		// A dumb buffer is linear. Asked for LINEAR only - a cursor plane
++		// of a driver without modifiers, the only thing it takes - it has
++		// to say so: reported as INVALID, the DRM backend refused it ("cannot
++		// be scanned out") and the cursor fell back to software.
++		.modifier = wlr_drm_format_has(format, DRM_FORMAT_MOD_INVALID) ?
++			DRM_FORMAT_MOD_INVALID : DRM_FORMAT_MOD_LINEAR,
+ 		.n_planes = 1,
+ 		.offset[0] = 0,
+ 		.stride[0] = buffer->stride,
+diff --git a/include/render/swapchain.h b/include/render/swapchain.h
+--- a/include/render/swapchain.h
++++ b/include/render/swapchain.h
+@@ -23,6 +23,10 @@
+ 
+ 	struct wlr_swapchain_slot slots[WLR_SWAPCHAIN_CAP];
+ 
++	// Keep handing out the last submitted buffer (age 1), even while the
++	// backend still holds it as the plane's current FB: one buffer, one FB.
++	bool single_buffer;
++
+ 	struct wl_listener allocator_destroy;
+ };
+ 
+diff --git a/render/swapchain.c b/render/swapchain.c
+--- a/render/swapchain.c
++++ b/render/swapchain.c
+@@ -82,6 +82,26 @@
+ 
+ struct wlr_buffer *wlr_swapchain_acquire(struct wlr_swapchain *swapchain,
+ 		int *age) {
++	if (swapchain->single_buffer) {
++		// Render into the buffer that was committed last, which is normally
++		// still the plane's current FB (locked by the backend, so its slot
++		// stays acquired): the next commit then carries the same FB, and its
++		// damage clips are honored. Age 1: it holds the previous frame.
++		for (size_t i = 0; i < WLR_SWAPCHAIN_CAP; i++) {
++			struct wlr_swapchain_slot *slot = &swapchain->slots[i];
++			if (slot->buffer == NULL || slot->age != 1) {
++				continue;
++			}
++			if (!slot->acquired) {
++				return slot_acquire(swapchain, slot, age);
++			}
++			if (age != NULL) {
++				*age = slot->age;
++			}
++			return wlr_buffer_lock(slot->buffer);
++		}
++	}
++
+ 	struct wlr_swapchain_slot *free_slot = NULL;
+ 	for (size_t i = 0; i < WLR_SWAPCHAIN_CAP; i++) {
+ 		struct wlr_swapchain_slot *slot = &swapchain->slots[i];
+diff --git a/types/output/render.c b/types/output/render.c
+--- a/types/output/render.c
++++ b/types/output/render.c
+@@ -1,6 +1,9 @@
+ #include <assert.h>
+ #include <drm_fourcc.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <xf86drm.h>
++#include <wlr/backend/drm.h>
+ #include <wlr/interfaces/wlr_output.h>
+ #include <wlr/render/interface.h>
+ #include <wlr/util/log.h>
+@@ -37,6 +40,51 @@
+ }
+ 
+ /**
++ * Whether the output's swapchain should keep a single buffer (see
++ * wlr_swapchain.single_buffer). Only for DRM outputs of virtual GPUs drawn
++ * into dumb buffers (the pixman renderer), whose scanout is a host-side copy
++ * that the driver refreshes from the dumb buffer: virtio-gpu uploads the whole
++ * plane when the FB changes and only FB_DAMAGE_CLIPS when it does not, so
++ * double buffering costs a full-screen transfer per frame. GPU-rendered
++ * buffers (GBM: virgl) are what the host displays, not a copy, and are left
++ * alone, as are drivers that scan out of VRAM (bochs-drm) and flip for free.
++ * WLR_DRM_SINGLE_BUFFER=1/0 forces it on/off (DRM outputs only).
++ */
++static bool output_want_single_buffer(struct wlr_output *output) {
++	if (!wlr_output_is_drm(output)) {
++		return false;
++	}
++	const char *env = getenv("WLR_DRM_SINGLE_BUFFER");
++	if (env != NULL && env[0] != '\0') {
++		return strcmp(env, "1") == 0;
++	}
++	// The DRM dumb allocator is the one whose buffers the CPU maps.
++	if (output->allocator == NULL ||
++			!(output->allocator->buffer_caps & WLR_BUFFER_CAP_DATA_PTR)) {
++		return false;
++	}
++	int fd = wlr_backend_get_drm_fd(output->backend);
++	if (fd < 0) {
++		return false;
++	}
++	drmVersion *version = drmGetVersion(fd);
++	if (version == NULL) {
++		return false;
++	}
++	static const char *const virtual_drivers[] = {
++		"virtio_gpu", "vmwgfx", "qxl", "cirrus",
++	};
++	bool single = false;
++	for (size_t i = 0; i < sizeof(virtual_drivers) / sizeof(virtual_drivers[0]); i++) {
++		if (strcmp(version->name, virtual_drivers[i]) == 0) {
++			single = true;
++		}
++	}
++	drmFreeVersion(version);
++	return single;
++}
++
++/**
+  * Ensure the output has a suitable swapchain. The swapchain is re-created if
+  * necessary.
+  *
+@@ -92,6 +140,12 @@
+ 		return false;
+ 	}
+ 
++	swapchain->single_buffer = output_want_single_buffer(output);
++	if (swapchain->single_buffer) {
++		wlr_log(WLR_INFO, "Output '%s': single-buffered swapchain "
++			"(virtual GPU, damage-only uploads)", output->name);
++	}
++
+ 	wlr_swapchain_destroy(output->swapchain);
+ 	output->swapchain = swapchain;
+ 
+diff --git a/types/output/cursor.c b/types/output/cursor.c
+--- a/types/output/cursor.c
++++ b/types/output/cursor.c
+@@ -1,6 +1,7 @@
+ #include <assert.h>
+ #include <drm_fourcc.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <wlr/interfaces/wlr_output.h>
+ #include <wlr/render/wlr_renderer.h>
+ #include <wlr/types/wlr_matrix.h>
+@@ -307,6 +308,20 @@
+ 			- tr_size.height / 2.0);
+ 	}
+ 
++	// LP: WLR_DRM_CURSOR_FLIP_Y=1 - the host reads a virtio-gpu cursor
++	// back upside down when the image was drawn with OpenGL (virglrenderer
++	// flips every cursor it reads, taking GL's bottom-up rows for granted),
++	// so the whole buffer is drawn upside down here and arrives upright.
++	const char *flip_y = getenv("WLR_DRM_CURSOR_FLIP_Y");
++	if (flip_y != NULL && strcmp(flip_y, "1") == 0) {
++		float flip[9] = {
++			1.0f, 0.0f, 0.0f,
++			0.0f, -1.0f, (float)buffer->height,
++			0.0f, 0.0f, 1.0f,
++		};
++		wlr_matrix_multiply(output_matrix, flip, output_matrix);
++	}
++
+ 	float matrix[9];
+ 	wlr_matrix_project_box(matrix, &cursor_box, transform, 0, output_matrix);
+ 

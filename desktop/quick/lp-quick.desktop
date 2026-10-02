@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Quick menu
+Name[ko]=퀵메뉴
+Comment=Volume, network and power, in one panel
+Comment[ko]=볼륨과 네트워크, 전원을 한 자리에서
+Exec=lp-quick
+Icon=preferences-system
+Terminal=false
+Categories=System;Settings;
+NoDisplay=true
+StartupWMClass=org.lpzero.QuickMenu

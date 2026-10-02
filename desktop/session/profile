@@ -1,0 +1,28 @@
+# /etc/profile - read by every login shell: ours (lpsh), dash, bash.
+#
+# /bin before /usr/bin, deliberately. /bin is this system's own hundred
+# and thirty commands and /usr/bin is the Debian base underneath it, so
+# `ls` and `grep` are ours and `wayfire` and `foot` are theirs. Putting
+# the base first would leave a machine that boots our kernel and our
+# init into somebody else's userland.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+
+# The rest only where nothing has set it already. A terminal on the
+# desktop comes with the session's home, terminal type, language and
+# runtime directory; this file used to set all four to root's console
+# values, and every terminal then had its home at /root (`cd` and `~`
+# went there and were refused), TERM=linux in a terminal that is not
+# one, English in a Korean session, and root's XDG_RUNTIME_DIR - so a
+# program started from it could not find the desktop's display.
+[ -n "$HOME" ] || HOME=/root
+[ -n "$TERM" ] || TERM=linux
+[ -n "$PAGER" ] || PAGER=more
+[ -n "$EDITOR" ] || EDITOR=edit
+# 이 기계의 기본 언어는 영어다. 데스크탑 세션은 session-run 이
+# ~/.config/lp/locale 을 읽어 계정마다 따로 정하고, 콘솔은 이 값을
+# 쓴다.
+[ -n "$LANG" ] || LANG=en_US.UTF-8
+# Where the compositor and everything it talks to put their sockets:
+# the session's own, or root's on the console (there is no logind).
+[ -n "$XDG_RUNTIME_DIR" ] || XDG_RUNTIME_DIR=/run/user/$(id -u)
+export HOME TERM PAGER EDITOR LANG XDG_RUNTIME_DIR

@@ -1,0 +1,853 @@
+# /etc/rc - the boot script. init runs it exactly once.
+#
+# Anything that has to stay alive belongs in /etc/services, not here.
+# Nothing started from this file gets restarted when it dies.
+#
+# Our own shell runs this. There is no variable expansion and no if, but
+# && || ; all work, so every step carries a fallback and a failure never
+# stops the boot.
+
+echo "[rc] naming the machine"
+# Without this the hostname is "(none)", which shows up in the shell
+# prompt and in every log line. One word, and the machine has a name.
+echo lpzero > /proc/sys/kernel/hostname || echo "[rc]   could not set it"
+
+echo "[rc] the root filesystem"
+# Two shapes of machine run this same script, and most of what follows
+# depends on which one it is.
+#
+#   in RAM    Every arm64 image, and the amd64 one meant for a USB
+#             stick. The root is a cpio inside the kernel, unpacked at
+#             every boot. Nothing written to it survives, so /data is
+#             mounted from a partition and /bin, /usr and the home
+#             directory are made to point at it.
+#
+#   on disk   The amd64 desktop image. preinit mounted a real ext4
+#             partition and switched to it before this script started.
+#             / is an ordinary filesystem: files stay, packages install
+#             into /usr, and every one of those workarounds is not just
+#             unnecessary but wrong.
+#
+# preinit mounts the root read-only on purpose - ext4 replays its
+# journal either way, and a root made writable before anything has
+# looked at it is a root a half-finished write can make worse. Now that
+# it has been mounted cleanly, it can be written to.
+if grep -q " / ext4 " /proc/mounts
+then
+    mount -o remount,rw / && echo "[rc]   on disk, writable" || echo "[rc]   on disk but still read-only - files will not save"
+else
+    echo "[rc]   in RAM (the data partition is what survives a reboot)"
+fi
+
+echo "[rc] arming the watchdog"
+# The watchdog daemon starts from /etc/services, which is after this
+# script finishes - so a boot that hangs partway through this file would
+# hang forever, with no daemon yet to notice. This arms the hardware
+# timer now and exits: nothing pets it until the daemon starts, so if we
+# never get that far the board resets itself and tries again.
+#
+# Two minutes is deliberately generous. The first boot on a large card
+# grows the filesystem, and DHCP has its own timeouts to run out.
+watchdog -1 -t 120 || echo "[rc]   no hardware watchdog on this board"
+
+echo "[rc] kernel memory reserves"
+# Memory root can always get at, so an administrator still has room to
+# clean up when things run dry. The default 8MB is too tight.
+echo 65536 > /proc/sys/vm/admin_reserve_kbytes || echo "[rc]   failed"
+# The minimum the kernel always keeps free. Too low and allocations
+# start failing abruptly.
+echo 16384 > /proc/sys/vm/min_free_kbytes || echo "[rc]   failed"
+
+echo "[rc] safety net"
+# Compressed swap inside RAM. Nothing is written to the card.
+zram on || echo "[rc]   carrying on without zram"
+# Swap is RAM here (compressed), not a disk: swapping early is cheap and
+# keeps the page cache, and reading ahead 8 pages at a time from zram
+# only decompresses pages nobody asked for.
+echo 100 > /proc/sys/vm/swappiness 2>/dev/null
+echo 0 > /proc/sys/vm/page-cluster 2>/dev/null
+
+echo "[rc] a ceiling on the number of processes"
+# guard kills a fork bomb, but cleaning one up is the second line of
+# defence. This is the first: a hard ceiling on how many processes can
+# exist at all, so the bomb stops growing on its own.
+#
+# Why a sysctl and not a per-user limit: RLIMIT_NPROC is what you would
+# normally reach for, and root is exempt from it - a process with
+# CAP_SYS_RESOURCE passes the fork check whatever the limit says, and
+# every process here starts as root. pid_max applies to everybody.
+#
+# 4096 is high enough that nothing legitimate on a 512MB board ever
+# comes near it (a busy boot runs about twenty processes, and python
+# with threads a few dozen), and low enough that the whole table can be
+# walked in the time guard has to answer. At 4096, fork() starts
+# returning EAGAIN, which is an error every program is written to
+# handle - the same trick /tmp uses with "no space left on device".
+echo 4096 > /proc/sys/kernel/pid_max || echo "[rc]   could not set pid_max"
+# Threads count against the same ceiling from the other side. Leaving
+# headroom below pid_max means a thread-happy program hits its own limit
+# first and fails cleanly, rather than taking the last pid on the board.
+echo 3000 > /proc/sys/kernel/threads-max || echo "[rc]   could not set threads-max"
+# One daemon watching the five things that take this board down:
+#   memory   kills the largest process before the kernel has to guess,
+#            and marks init/sh/dropbear/wpa_supplicant/watchdog/logd/guard
+#            with oom_score_adj=-1000 so the kernel cannot take them
+#   heat     holds the CPU at its lowest speed above 80C
+#   power    the same, on the firmware's undervoltage flag - which is the
+#            usual reason SD cards get corrupted, and is otherwise silent
+#   CPU      a process holding a core for a minute goes to the back of
+#            the queue, so SSH still answers
+#   disk     warns before /data fills, drops the old log if it does
+#
+# guard is NOT started here any more. It is in /etc/services, so that
+# init restarts it when it dies. Started from this file it was started
+# once and never revived, which made "kill guard" a permanent, silent
+# disabling of every defence above - the worst fault the board had.
+
+# /tmp with a ceiling on it.
+#
+# The root filesystem lives in RAM, and a file written there is memory
+# that no process owns. guard would watch the free memory fall and start
+# killing processes, and none of it would give a single page back. So
+# /tmp gets its own filesystem with a limit: a program that runs away
+# writing temporary files hits "no space left" - which it is written to
+# handle - instead of taking the machine down with it.
+#
+# On a disk root (the amd64 desktop) memory is not also the disk, and
+# 64MB was a desktop's /tmp: an archive unpacked, a download staged or a
+# browser's cache there ran out of room. tmpfs's own ceiling - half of
+# the memory, and only what is written is used - is the limit there.
+if grep -q " / ext4 " /proc/mounts
+then
+    mount -t tmpfs -o nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
+else
+    mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
+fi
+
+# /dev/shm, which is not optional the moment there is a graphical
+# session.
+#
+# Every Wayland client draws into a shared memory buffer and hands the
+# compositor a file descriptor for it. shm_open() creates that file in
+# /dev/shm and nowhere else. Without the mount the call fails, the client
+# asserts on a file descriptor of -1, and the screen stays black - with
+# an error that says nothing about a missing mount.
+#
+# Nothing on a headless machine ever noticed, which is why it was not
+# here before.
+#
+# 64MB is not enough for that session: one frame of a 4K screen is 33MB,
+# and browsers keep their tabs' shared memory here - they crash when it
+# is full. On a disk root (the desktop) it gets tmpfs's own ceiling.
+mkdir -p /dev/shm
+if grep -q " / ext4 " /proc/mounts
+then
+    mount -t tmpfs -o nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
+else
+    mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
+fi
+
+# udev, and the reason is the keyboard.
+#
+# devtmpfs already made /dev/input/event0 and /dev/dri/card0 - the kernel
+# does that on its own and nothing here is needed for the nodes to exist.
+# What is missing without udev is the other half: the properties. libinput
+# does not open /dev/input/event* by looking in the directory; it asks udev
+# for the devices on seat0 that carry ID_INPUT, and udev only sets that tag
+# by running its rules over each device as it appears.
+#
+# With no udevd, that query returns nothing. wlroots then starts a
+# compositor with zero input devices - it draws the desktop, the bar comes
+# up, and not one keystroke or click reaches it. Nothing in any log says
+# so, because from the compositor's point of view this machine simply has
+# no keyboard.
+#
+# It is also what makes a USB stick plugged in later turn into
+# /dev/sdb1 with a label, and what gives the video card group ownership
+# the session can use.
+#
+# --daemon rather than a service entry: everything below this line may
+# want a device that only exists once the rules have run, so this has to
+# finish here rather than start alongside.
+if test -x /bin/udevadm ; then
+    echo "[rc] devices"
+    # /lib/systemd/systemd-udevd is a symlink to udevadm, and udevadm
+    # decides what it is from argv[0]. Calling the symlink is what makes
+    # it the daemon; calling /bin/udevadm --daemon is a usage error.
+    /lib/systemd/systemd-udevd --daemon 2>/dev/null || echo "[rc]   udevd did not start - input devices will not be found"
+    /bin/udevadm trigger --action=add > /dev/null 2>&1
+    /bin/udevadm settle --timeout=10 > /dev/null 2>&1
+    echo "[rc]   $(ls /dev/input 2>/dev/null | wc -l) input, $(ls /dev/dri 2>/dev/null | wc -l) graphics, $(ls /dev/snd 2>/dev/null | wc -l) sound"
+fi
+
+# The system bus.
+#
+# Not the same thing as the session bus - the session's own bus is
+# started by dbus-run-session inside start-desktop, and it dies with the
+# session. This one is the machine's, and it is what polkit, udisks and
+# pipewire's realtime module talk to. Without it a USB stick cannot be
+# mounted from the file manager, and every one of those programs logs a
+# connection error at start that reads like a fault in itself.
+if test -x /usr/bin/dbus-daemon ; then
+    mkdir -p /run/dbus /var/lib/dbus
+    # The machine id. dbus refuses to start without one, and a machine
+    # that makes a new one every boot looks like a different machine to
+    # everything that remembers it - so it is written once and kept.
+    test -s /etc/machine-id || dbus-uuidgen > /etc/machine-id
+    cp /etc/machine-id /var/lib/dbus/machine-id
+    dbus-daemon --system --fork || echo "[rc]   the system bus did not start"
+fi
+
+echo "[rc] the boot partition"
+# Mounted before the data partition, and read-only.
+#
+# Read-only because FAT has no journal: a power cut while it is writable
+# can lose the whole partition, and the kernel is on it. We only ever
+# read from here, so there is nothing given up by it.
+#
+# First because e2fsck lives here. The tool that repairs the data
+# partition cannot be on the data partition, and putting it in the
+# system image would cost 1.4MB of RAM for the life of the machine, for
+# a program that usually does nothing.
+#
+# -L LPZERO: only mount a boot partition that says it is ours, for the
+# same reason /data is checked - and with more at stake. Boot from USB
+# with an unrelated SD card still in the slot and both exist; the card
+# is tried first. Without the label check, that stranger's FAT
+# partition becomes /boot, and /boot is where this system reads:
+#
+#   authorized_keys      who may log in over SSH
+#   firewall.conf        which ports are open
+#   wpa_supplicant.conf  the WiFi network and its password
+#   e2fsck               a binary that fsck runs as root
+#
+# That is not a filesystem mix-up. It is handing somebody the machine.
+#
+# -w on the USB attempt: the bus takes about a second to enumerate, and
+# this runs long before that. Without it, a board booted from a USB
+# stick came up with no /boot at all - and so with no authorized key,
+# which on a machine reached only over SSH is the same as gone.
+#
+# This is not the only place /boot gets mounted any more. Pull the card
+# out of a running board and automount detaches /boot along with
+# everything else on the card, and mounts it again - read-only, label
+# checked, same as here - when the card comes back. If the options on
+# this line change, change them there too: automount.c, bring_back().
+mkdir -p /boot
+# fmask/dmask: root only. FAT has no owners, so without them every file
+# here reads as 0755 to every account - and the private SSH key authkey
+# writes here logs in as root, so on a machine with more than one
+# account (the desktop) any of them could have read it and become root.
+# The owner still reads it from any PC: the masks are this mount's, not
+# the disk's.
+mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/vda1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro,fmask=0077,dmask=0077 /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
+
+echo "[rc] checking the data partition"
+# Before mounting it, and before expandfs, which mounts it to resize.
+#
+# In preen mode: repair what can be repaired without asking, and do
+# nothing at all when the filesystem is already clean - which reads the
+# superblock and exits, so this costs milliseconds on a normal boot.
+# ext4 mounted errors=remount-ro notices damage and stops writing; this
+# is the part that does something about it afterwards.
+fsck /dev/mmcblk0p2 /dev/vda2 /dev/nvme0n1p2 /dev/sda2
+
+echo "[rc] storage"
+# The image is 256MB, so on a larger card the rest sits unallocated.
+# On the first boot we grow the partition and the filesystem to the end
+# of the card.
+# The card shows up under a different name depending on where we are
+# running, and there is no way to ask "which disk did I boot from" with
+# the tools we have. So try each in turn:
+#   mmcblk0   the real board's SD card
+#   vda       VirtIO - QEMU and UTM's default
+#   nvme0n1   NVMe - the other interface UTM offers
+#   sda       USB - a stick or an enclosure on the board, and what UTM
+#             uses when the drive is attached over USB
+# Only one of them exists at a time, so the failures are silent and cheap.
+#
+# USB comes last on purpose. It is the one that has to be waited for (-w),
+# because the bus takes about a second to enumerate, and there is no point
+# paying that when the card is already there.
+#
+# -L LPZERODATA: only mount a partition that says it is ours. Four names
+# are tried because the disk is called something different on an SD card,
+# a USB stick, NVMe and a virtual disk - and if two of them exist at once
+# (booted from USB with a card still in the slot) the wrong one would
+# otherwise become /data, and the log and the SSH host key would be
+# written to somebody else's card.
+#
+# errors=remount-ro: if ext4 hits corruption it goes read-only there and
+# then, rather than carrying on and writing more damage over it. The
+# system stays up and reachable - the root filesystem is in RAM - so
+# there is a chance to look at it.
+#
+# nosuid,nodev: a data partition has no business carrying a setuid
+# binary or a device node, and both are how a file written to a card
+# somewhere else turns into root on this machine. It does not stop
+# programs on /data running - Python and /data/bin need that - but it
+# does mean that dropping a setuid-root binary there achieves nothing.
+#
+# Every device is named explicitly, including the first. It used to be
+# called with no arguments, which meant "the SD card" - and that is the
+# wrong disk when the board booted from USB with somebody else's card
+# still in the slot. expandfs checks the partition label before it
+# writes anything, which is the real defence, but the intent belongs in
+# this file too.
+#
+# `datadisk --boot` comes first, and is the only part of this that a
+# person can change without rebuilding the card. It mounts whatever
+# /boot/data.conf names - after checking that it is still ext4 and still
+# labelled ours, and running e2fsck over it - and fails quietly when
+# there is nothing recorded, which is when everything below happens
+# exactly as it did before that command existed.
+#
+# That file is on the FAT partition on purpose. Choosing the wrong disk
+# is the kind of mistake that stops the machine booting properly, and a
+# card reader is then the only way to take it back.
+#
+# These stay on one line each: our shell has no line continuation, and a
+# trailing backslash would be passed through as an argument.
+#
+# And these options are duplicated in one other place on purpose:
+# automount re-mounts /data with exactly this set when the card is
+# pulled out of a running board and put back. Two mounts of one
+# filesystem with different options is how a filesystem gets corrupted
+# rather than merely full, so if errors=remount-ro,nosuid,nodev changes
+# here it has to change in automount.c, bring_back(), as well.
+#
+# On a disk-rooted machine the partition being grown is the root itself,
+# already mounted at /, and /data is a directory on it rather than a
+# partition of its own - so there is nothing to mount and the whole
+# chain of candidate device names would be four failures and a
+# misleading "continuing in RAM".
+expandfs /dev/mmcblk0 /dev/mmcblk0p2 || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
+if grep -q " / ext4 " /proc/mounts
+then
+    mkdir -p /data || echo "[rc]   cannot make /data on the root"
+else
+    datadisk --boot || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/nvme0n1p2 /data || mount -L LPZERODATA -w -o errors=remount-ro,nosuid,nodev /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
+fi
+
+# Somewhere for logd to write. It starts from /etc/services right
+# after this script, so the directory has to exist by now.
+mkdir -p /data/log
+
+echo "[rc] keeping what gets installed"
+# The root filesystem is a copy in RAM of an archive inside the kernel
+# image, so anything written into it is gone at the next boot - which is
+# the wrong answer to `cp mytool /bin/`, or to a `make install` that
+# writes to /usr/local. The command succeeds, the file is there, and a
+# reboot silently undoes it.
+#
+# So /bin, /sbin, /lib, /usr, /opt and /srv get an overlay: the image's
+# copy underneath, a directory on the data partition on top. Reads see
+# both, writes land on the card. Nothing has to know - cp, tar and
+# make install all just work and the result is there tomorrow.
+#
+# This has to happen before anything else installs or writes programs,
+# and after /data is mounted, which is why it is here and not lower
+# down. `persist` on its own lists what is being kept.
+#
+# This is no longer the only time it runs. Those six overlays have their
+# upper layer on the card, so pulling the card out of a running board
+# kills all six at once - and with them every command on the machine.
+# automount detaches them with umount2(MNT_DETACH), which puts /bin back
+# to the system image so the board is usable again, and runs `persist
+# on` a second time once the card is back. persist copes with being run
+# on a live system; see the note at the top of persist.c.
+persist on || echo "[rc]   things installed into the system will NOT survive a reboot"
+
+# And the individual /etc files somebody asked to keep. /etc itself has
+# no overlay on purpose - the two files the boot has already read by now,
+# /etc/rc and /etc/services, must come from the image or an old copy on
+# the card could stop the board booting. Everything else in /etc is fair
+# game, and `persist etc keep /etc/hosts` is how it gets kept. This is a
+# copy rather than a mount, so a /data that vanishes mid-boot cannot
+# leave /etc half shadowed.
+persist etc restore || echo "[rc]   some kept /etc files could not be put back"
+
+echo "[rc] the system update"
+# Nothing happens here unless a new system was installed and has not yet
+# proved itself. When one has, this counts the attempt: three starts
+# without staying up for five minutes and the previous image goes back
+# and the board reboots into it.
+#
+# guard is the other half - it deletes the trial marker once the board
+# has been up five minutes with memory, temperature and services all
+# fine, which is the definition of the new system being all right.
+#
+# This cannot help with a system that does not start at all: nothing on
+# this board runs before the kernel does. `update` checks the image
+# before switching to it for exactly that reason, and keeps the previous
+# one on the boot partition so that a card reader is a way back.
+update --confirm || echo "[rc]   could not check the update state"
+
+echo "[rc] users"
+# /etc is in RAM and is rebuilt from the kernel image at every boot, so a
+# user added with useradd would be gone by morning. useradd writes to
+# /data/users instead and this merges it back in - the same trick the
+# SSH keys use, and for the same reason: the data partition is the only
+# writeable thing that survives.
+#
+# Delete /data/users and the machine is back to the users it was built
+# with, which is the way out if one of them stops something working.
+#
+# This was `cat /data/users >> /etc/passwd` and is not any more. That
+# copies whatever the file holds, and a line with uid 0 in it is root
+# under another name, arriving at every boot off a partition that any
+# card reader can write. useradd refuses to create such a line; the
+# merge has to refuse to read one back, or the refusal means nothing.
+useradd --merge || echo "[rc]   some users were refused - see above"
+
+echo "[rc] other people's programs"
+# Making an ordinary Linux binary run here.
+#
+# Everything in this system is statically linked against the libc in
+# userland/libc, so there is no dynamic loader anywhere in the image and
+# a program built for any other Linux fails at execve - the kernel looks
+# for its interpreter and does not find one. That covers ripgrep, node,
+# git, and also every piece of prebuilt malware, which is not an
+# accident worth giving up lightly.
+#
+# But CPython is dynamically linked now, so glibc is already on /data
+# for it. These symlinks point the standard paths at that copy, and with
+# them a normal aarch64 binary runs.
+#
+# The trade is deliberate and worth stating: dropping a binary on this
+# machine used to be useless to an attacker, and now it is not. What is
+# kept is that none of this exists in the system image - it appears only
+# when /data carries glibc, and it goes away with the partition. Delete
+# /data/glibc and the door closes again.
+#
+# ── Why this is a glob and not a list ──
+#
+# It used to be a hardcoded list of ten library names, and the first
+# one on it was ld-linux-aarch64.so.1. That is the loader on arm64. On
+# amd64 the loader is called ld-linux-x86-64.so.2.
+#
+# So on every amd64 image this loop made /lib/ld-linux-aarch64.so.1
+# pointing at a file that was not there, never made the loader that
+# was, and then printed "ordinary Linux binaries will run". Not one of
+# them could. The message was the only part that worked, which is why
+# it went unnoticed - `run`, external tools, anything built on another
+# Linux, all failed with errors that sounded like the program's fault.
+#
+# A list has to be kept in step with what the build stages. A glob
+# cannot fall out of step with it.
+if test -d /data/glibc
+then
+    mkdir -p /lib
+    for lib in /data/glibc/*
+    do
+        ln -s $lib /lib
+    done
+
+    # x86-64 keeps the loader at /lib64, not /lib.
+    #
+    # That is not a convention, it is in the ABI: every x86-64 binary
+    # carries the string "/lib64/ld-linux-x86-64.so.2" in its program
+    # headers and the kernel opens exactly that path. A link in /lib is
+    # never consulted. arm64 uses /lib and needs nothing extra, which is
+    # part of why this went unseen while arm64 was the only target.
+    if test -f /data/glibc/ld-linux-x86-64.so.2
+    then
+        mkdir -p /lib64
+        ln -s /data/glibc/ld-linux-x86-64.so.2 /lib64
+    fi
+
+    # Debian's multiarch layout. Anything built on Debian or Ubuntu
+    # looks under one of these before it looks in /lib, and most of what
+    # anybody will want to drop on this machine was built on one of them.
+    mkdir -p /usr/lib
+    if test -f /data/glibc/ld-linux-x86-64.so.2
+    then
+        ln -s /data/glibc /lib/x86_64-linux-gnu
+        ln -s /data/glibc /usr/lib/x86_64-linux-gnu
+    fi
+    if test -f /data/glibc/ld-linux-aarch64.so.1
+    then
+        ln -s /data/glibc /lib/aarch64-linux-gnu
+        ln -s /data/glibc /usr/lib/aarch64-linux-gnu
+    fi
+
+    echo "[rc]   glibc is on /data - ordinary Linux binaries will run"
+fi
+
+echo "[rc] restoring the clock"
+# Two kinds of machine, two answers.
+#
+# A PC or an EC2 instance has a battery-backed clock that keeps running
+# while the power is off, and the kernel now reads it before this script
+# starts (CONFIG_RTC_HCTOSYS). On those, the time is already right here
+# and the line below finds the clock ahead of anything saved and leaves
+# it alone.
+#
+# A Pi Zero 2 W has no such clock. At power-on its clock starts at 1970.
+# Left that way, file timestamps are nonsense and HTTPS fails outright,
+# because every server certificate looks like it was issued in the
+# future. So we start from the time saved at the last shutdown - not
+# exact, and it does not advance while the board is off, but it is on
+# the right side of every certificate. The real time comes once the
+# network is up.
+ntp -r || echo "[rc]   no saved time (first boot)"
+hwclock -r > /dev/null && echo "[rc]   hardware clock present - the time survives a power cut"
+
+echo "[rc] home directory on storage"
+# /root is in RAM and would vanish on reboot. Bind a directory from the
+# data partition over it so whatever is saved in home stays.
+#
+# On a disk root /root is already a real directory that keeps what is
+# put in it, and binding /data/root over it would move somebody's home
+# to a strange path for no reason - and hide anything the image shipped
+# there, .profile included.
+if grep -q " / ext4 " /proc/mounts
+then
+    mkdir -p /root/.ssh || echo "[rc]   cannot make /root/.ssh"
+else
+    # automount binds this back the same way after the card has been
+    # pulled and put in again - automount.c, bring_back().
+    mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   home is in RAM (lost on reboot)"
+fi
+
+echo "[rc] reading settings from the boot partition"
+# A copy on /data, so that WiFi still comes up on a boot where /boot
+# cannot be read.
+#
+# This overwrites the copy on /data every time, which is the same rule
+# authorized_keys follows and is written on the boot partition's README:
+# while the file exists on /boot, /boot is the source of truth, and
+# editing the copy on the machine achieves nothing. To manage the
+# setting from the machine instead, delete the file from /boot.
+if cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf; then
+    # FAT has no permissions, so everything read from /boot arrives 0755.
+    # This file holds the WiFi password. World-readable and executable is
+    # wrong for it twice over, and defend says so on every boot -
+    # "/data/wpa_supplicant.conf is executable, and that is a place for
+    # data" - which trains whoever owns the board to skim past defend's
+    # output, which is where the reports that matter also are.
+    chmod 0600 /data/wpa_supplicant.conf
+    echo "[rc]   took the WiFi settings (delete it from /boot to manage them here)"
+fi
+
+echo "[rc] SSH keys"
+# Losing the data partition must not lock the owner out of their own
+# machine. /root is a bind mount from /data, so the authorized key is on
+# the partition most likely to be destroyed - by ransomware, by a mistake,
+# or by a card wearing out. The machine would then boot perfectly and be
+# unreachable forever, with password authentication compiled out.
+#
+# So the key is kept in three places, each harder to destroy than the
+# last, and merged back here on every boot:
+#
+#   /data     the live one. Assume it is gone.
+#   /boot     FAT32, mounted read-only, writable from any PC.
+#   the image inside the kernel, unpacked into RAM at boot. Nothing on
+#             any filesystem can reach it; only writing a new card can.
+#
+# authkey exits non-zero when the result is empty, which is the one state
+# worth doing something about - and doing something is better than saying
+# something. A card with no key is unreachable, this board has no
+# ethernet and no passwords, and the only other route is to power it
+# down and find a computer with a card slot.
+#
+# So a fresh card makes itself a key: generated here from the kernel's
+# randomness, different on every machine, and never anywhere else. The
+# private half lands on the FAT boot partition, which any computer can
+# read, and `authkey new` prints the ssh command to use it.
+#
+# This is what was already happening, by accident. The line used to be
+#
+#   authkey || echo "... Run `authkey new` here ..."
+#
+# and those backticks are command substitution inside a double-quoted
+# string: the sentence meant to tell somebody to run it ran it. The
+# effect was right and nothing said so, the message came out mangled
+# around the captured output, and it would have quietly stopped the day
+# the shell learned to warn about backticks.
+if ! authkey; then
+    echo "[rc]   no key can log in yet - making one for this machine"
+    authkey new
+fi
+
+echo "[rc] WiFi configuration"
+# The boot partition wins, then the data partition, then the image.
+#
+# This order matters for getting back in. The data partition is the one
+# that gets destroyed, and a file full of encrypted nonsense is still a
+# file: read first, it would win over a perfectly good copy on /boot, the
+# WiFi would not associate, and a machine reached only over SSH would be
+# gone for good. /boot is writable only from a PC with the card in hand,
+# which is as close to "the owner asked for this" as this board gets.
+#
+# The copy on /data is read when /boot has none - which is both the
+# fallback for an unreadable boot partition and the way to manage the
+# setting from the machine: delete the file from /boot and this one
+# wins from then on.
+cat /boot/wpa_supplicant.conf > /etc/wpa.conf || cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
+# The working copy has the password in it too, and it is on the RAM root
+# where every process can reach it.
+chmod 0600 /etc/wpa.conf
+
+# Keep the WiFi chip awake.
+#
+# brcmfmac enables power save by default: the chip sleeps between
+# beacons, saves a little current, and stops answering. What that looks
+# like from outside is a board that boots fine, works fine, and then a
+# few idle minutes later is gone - LED on, USB link up, ssh timing out -
+# until something wakes it. The router dropped a station that was asleep
+# when it asked. On a board whose whole job is to sit somewhere and be
+# reachable that is not a trade worth making, and it is the single most
+# reported symptom on this hardware.
+#
+# There is no module parameter and no sysfs file for it; nl80211 is the
+# only way, which is what `net powersave` speaks.
+#
+# The wait is for the firmware. brcmfmac creates wlan0 only after the
+# firmware has loaded off the card, which takes a second or two on a
+# Zero W, and rc gets here before that. Five seconds is generous for
+# that and short enough not to be felt on a board with no WiFi at all.
+i=0
+while [ $i -lt 10 ]; do
+    if [ -e /sys/class/net/wlan0 ]; then
+        net powersave off wlan0 > /dev/null 2>&1 \
+            && echo "[rc]   WiFi power save off (the chip stays reachable)" \
+            || echo "[rc]   could not turn WiFi power save off - 'net powersave off' to retry"
+        break
+    fi
+    sleep 0.5
+    i=`expr $i + 1`
+done
+
+echo "[rc] checking the SSH host key"
+# dropbear makes a new host key when the file is missing (-R), but a file
+# that exists and is damaged stops it starting at all - and then there is
+# no way in. dropbearkey -y reads the key and fails if it cannot; if it
+# fails, the file goes, and dropbear makes a fresh one.
+#
+# Clients will warn that the host key changed. That is the correct
+# warning to get: it did.
+# -y only READS a key and prints its public half. It never made one,
+# and nothing else did either: dropbear's -R generates into its own
+# compiled-in directory (/etc/dropbear) rather than the path -r names,
+# and that directory does not exist here. So on a fresh image there was
+# no host key anywhere, and every SSH connection was closed before
+# authentication with "Couldn't read or generate hostkey" - on a system
+# whose only remote access is SSH.
+#
+# It looked fine from the outside. dropbear was running, the port was
+# open, the firewall let it through, `service status dropbear` said
+# started. The failure only appeared to something that actually tried
+# to log in.
+#
+# So: check the key, and make one when the check fails.
+if dropbearkey -y -f /data/dropbear_ed25519_host_key > /dev/null ; then
+    echo "[rc]   SSH host key is in place"
+else
+    rm -f /data/dropbear_ed25519_host_key
+    if dropbearkey -t ed25519 -f /data/dropbear_ed25519_host_key > /dev/null ; then
+        echo "[rc]   made a new SSH host key"
+    else
+        echo "[rc]   ** could not make an SSH host key - SSH will refuse every connection"
+    fi
+fi
+
+# WiFi is started by init from /etc/services, not here - for the same
+# reason as guard. Started here with -B it backgrounded itself and
+# nothing restarted it, so a board that lost its association was off the
+# network for good with nothing watching. init has it now.
+
+echo "[rc] loopback"
+# 127.0.0.1 did not work at all until this line existed.
+#
+# The kernel creates lo but leaves it down, and nothing here ever
+# brought it up - so a program that bound to 127.0.0.1 was listening on
+# an address nothing could reach. `httpd -p 8451` then `wget
+# http://127.0.0.1:8451/` answered "cannot connect", with netstat
+# cheerfully showing the socket in LISTEN. Every language's "start a
+# local server and talk to it" does this, so did our own tests, and the
+# failure looks like the server being broken rather than the interface
+# being absent.
+ifconfig lo 127.0.0.1 netmask 255.0.0.0 || echo "[rc]   no loopback address"
+ifconfig lo up || echo "[rc]   ** 127.0.0.1 is unreachable - anything that binds to localhost will fail"
+
+echo "[rc] the USB way in"
+# usb0 gets an address before anything touches the wireless, and keeps
+# it whatever the wireless does afterwards.
+#
+# The reason is a failure seen on the board: brcmfmac loses its firmware
+# a few minutes after boot, and the thread that notices is holding RTNL
+# when it wedges. RTNL is one lock for all of networking, so from that
+# moment nothing can change any interface - dhcp cannot bring usb0 up,
+# `ifconfig usb0 up` blocks, and a board whose wireless died takes the
+# wired path down with it. On a headless machine that is the difference
+# between "the WiFi is broken" and "the machine is gone".
+#
+# The lock stops changes, not traffic. A link that was already
+# configured keeps carrying packets while the lock is held - so the way
+# to keep a way in is to configure it before the wireless exists at all.
+# This runs before wpa_supplicant, which init starts after this script.
+#
+# A link-local address is enough: this is a cable to one PC, there is no
+# router on it, and 169.254.0.0/16 is what both ends would negotiate
+# anyway. The last two bytes come from the interface's own MAC so two
+# boards on one desk do not collide.
+if [ -e /sys/class/net/usb0 ]; then
+    o5=`cut -d: -f5 /sys/class/net/usb0/address`
+    o6=`cut -d: -f6 /sys/class/net/usb0/address`
+    a=`printf '%d' 0x$o5`
+    b=`printf '%d' 0x$o6`
+    # 0 and 255 are the network and broadcast of their own /24, and
+    # 169.254.0.x and 169.254.255.x are reserved by RFC 3927.
+    if [ "$a" = "0" ]; then a=1; fi
+    if [ "$a" = "255" ]; then a=254; fi
+    if [ "$b" = "0" ]; then b=1; fi
+    if [ "$b" = "255" ]; then b=254; fi
+    ll=169.254.$a.$b
+    ifconfig usb0 $ll netmask 255.255.0.0 > /dev/null 2>&1 && ifconfig usb0 up > /dev/null 2>&1 && echo "[rc]   usb0 is up at $ll - ssh there over the USB cable" || echo "[rc]   usb0 is here but would not come up"
+else
+    echo "[rc]   no usb0 yet (nothing plugged into the USB port, or the gadget is off)"
+fi
+
+echo "[rc] name resolution"
+# A fallback nameserver, written before DHCP runs and overwritten by it
+# when it succeeds.
+#
+# Without this, a failed DHCP leaves no /etc/resolv.conf at all, and
+# every name lookup on the machine fails - ntp cannot find a time
+# server, and a python script cannot reach anything by name. The board
+# comes up looking healthy and can talk to nobody.
+#
+# These two are the addresses most likely to be reachable from an
+# arbitrary network. If the router does answer DHCP, its own nameserver
+# replaces them a moment later.
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+
+echo "[rc] network address"
+# A static address, if one was written on the boot partition. Same idea
+# as the WiFi settings and the SSH key: a file any PC can edit, so the
+# machine can be set up without a Linux box.
+#
+# This matters more than it looks. A DHCP lease has to be renewed, and
+# on a network with no DHCP server at all there is nothing to renew -
+# a fixed address is then the only way the board is reachable.
+ipconfig /boot/network.conf || echo "[rc]   no static address configured"
+
+# No DHCP here any more, and no ntp below.
+#
+# Both used to run at this point, when wpa_supplicant was also started
+# from rc a few lines above. wpa_supplicant is a supervised service now,
+# which means it starts after rc has finished - so this line was asking
+# for an address over a radio that had not been switched on yet. It
+# could not succeed, and it was not free: four DISCOVERs with a
+# three-second timeout each, then eth0 and usb0 failing instantly
+# because this board has neither. Twelve seconds of every boot, spent
+# proving that WiFi was not up.
+#
+# `dhcp -d` and `ntp -d` are services, they retry, and they bring the
+# interface up themselves. The address arrives a few seconds after rc
+# instead of during it. Nothing else in rc needs the network.
+
+echo "[rc] the firewall"
+# Applied after the address is up and before rc.local, so anything the
+# owner starts from rc.local is already behind it.
+#
+# `firewall boot` does whatever /boot/firewall.conf says - on, strict, or
+# nothing at all - and the standard policy when the file is not there.
+# The whole ruleset goes to the kernel as one transaction, so there is no
+# instant in which the drop policy is in force and the rule that keeps
+# SSH open is not. A failure leaves no rules rather than half of them.
+firewall boot || echo "[rc]   no firewall - every port is open"
+
+# (the time is set by the ntp service, for the reason above)
+
+# A user startup script. If it is on the data partition, run it.
+# This is the place to add things without burning the card again.
+#
+# bootcount goes first, and this is the only guard against a board that
+# reboots forever. A mistake in rc.local that hangs the machine would
+# otherwise be fatal: the watchdog reboots, rc.local hangs it again, and
+# there is never a window to log in and fix the file. So after five boots
+# that did not last five minutes, bootcount fails here and the script is
+# skipped - the machine comes up plain and reachable.
+# It runs in the BACKGROUND, and that is not a detail.
+#
+# The shell's `while` loop used to stop itself after a million rounds.
+# That was removed so a supervision loop could run for months - and it
+# turned this line into a way to brick the board. rc runs synchronously,
+# so a `while` loop here never returns; and because rc has to finish
+# before init starts anything, a loop in rc.local meant no guard, no
+# dropbear, no WiFi and no console shell, on a board with no way in.
+# Ctrl-C does not help either: this shell is init's child, with no
+# controlling terminal, so no key reaches it.
+#
+# In the background it cannot hold the boot up. A runaway there is then
+# an ordinary runaway, which is guard's job and which guard can see.
+# (sh -q: stay quiet when the file is not there.) On the desktop /bin/sh
+# is dash, which has no -q and stopped right there; our shell is lpsh.
+if test -x /bin/lpsh
+then
+    bootcount && lpsh -q /data/rc.local &
+else
+    bootcount && sh -q /data/rc.local &
+fi
+
+echo "[rc] checking what survived the reboot"
+# The root filesystem is inside the kernel image and unpacked into RAM
+# at every boot, so nothing written to it lasts. That leaves the data
+# partition, and on it exactly two files decide whether something runs
+# again or somebody gets back in: /data/rc.local and the authorized
+# keys. Two files is a short enough list to hash on every boot.
+#
+# This notices; it does not prevent. Whoever changed the file could
+# change the record beside it. It is aimed at automated malware and at
+# mistakes, which is what actually happens.
+integrity || echo "[rc]   run 'integrity -u' if that change was yours"
+
+# This start came up. The boot menu (lpboot.efi) counts every start and
+# offers LP Recovery first once two in a row have not said this; without
+# it every ordinary start counted, and the second restart after installing
+# went to Recovery by itself. Quiet and harmless where there is no UEFI.
+lp-reboot-recovery --boot-ok 2>/dev/null
+
+# 데스크탑.
+#
+# 있으면 띄우고 없으면 아무 일도 하지 않는다. 파이(램 루트) 이미지에는
+# 컴포지터가 들어가지 않으므로 /bin/start-desktop 자체가 없고, 그때
+# 이 블록은 통째로 건너뛴다 - 아키텍처마다 다른 rc 를 두는 것보다
+# 있는지 물어보는 편이 낫다.
+#
+# & 로 띄우는 이유: 세션은 로그아웃할 때까지 끝나지 않는다. 앞에서
+# 기다리면 rc 가 여기서 멈추고, 마지막 줄과 콘솔 셸이 영영 오지 않는다.
+if test -x /bin/start-desktop ; then
+    echo "[rc] 데스크탑"
+    start-desktop &
+fi
+
+# ── the screen belongs to whoever is sitting at it ──────────────
+#
+# Until this line the kernel prints straight onto the console, which is
+# what you want while booting: if the board dies at second nine, the
+# reason is on the screen.
+#
+# Afterwards it is the opposite. A driver that is unhappy repeats
+# itself, and a line like
+#
+#     [   13.935667] brcmfmac: ... error ...
+#
+# arriving every second lands in the middle of whatever is being typed.
+# The shell is still working - the characters go where they should - but
+# the screen is unusable, and on a board with no other console that is
+# the whole machine.
+#
+# So the console gets level 1 (only a panic) and everything else keeps
+# going to the ring buffer, where `dmesg` reads it and logd copies it to
+# /data/log/messages. Nothing is lost; it just stops being shouted.
+#
+# The four numbers are console, default, minimum, boot-time default.
+echo "1 4 1 7" > /proc/sys/kernel/printk \
+    || echo "[rc]   kernel messages will keep printing over the console"
+
+echo "[rc] done (init starts SSH from /etc/services)"
+echo "[rc]   kernel messages now go to the log only - 'dmesg' to read them"

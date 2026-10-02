@@ -1,0 +1,46 @@
+#!/bin/sh
+# lp-safe-mode - start in safe mode: sway drawing on the CPU, no 3D.
+#
+#   lp-safe-mode            the next boot starts in safe mode (once)
+#   lp-safe-mode --reboot   ... and restart now
+#   lp-safe-mode off        forget that
+#   lp-safe-mode status     what this session is, and what the next boot will be
+#
+# For a desktop that hangs or dies in the graphics driver: Windows' safe
+# mode. start-desktop reads the request at boot and removes it, so the
+# boot after is normal again. The desktop also goes to safe mode by itself
+# when it has failed to start three times in a row; lp.safe=1 on the
+# kernel's command line does the same from a boot loader.
+case "${1:-on}" in
+    status)
+        if test -e /run/lp-session/safe ; then
+            echo "this session: safe mode ($(cat /run/lp-session/safe))"
+        elif test -s /run/lp-session/compositor ; then
+            echo "this session: normal ($(sed -n 1p /run/lp-session/compositor))"
+        else
+            echo "this session: no desktop started yet"
+        fi
+        if test -e /etc/lp/safe-mode-next ; then echo "next boot: safe mode"
+        else echo "next boot: normal" ; fi
+        exit 0 ;;
+esac
+if test "$(id -u)" != 0 ; then
+    echo "lp-safe-mode: run it as root: sudo lp-safe-mode ${1:-}" >&2
+    exit 1
+fi
+case "${1:-on}" in
+    on|--reboot)
+        mkdir -p /etc/lp && : > /etc/lp/safe-mode-next && sync
+        echo "The next boot starts in safe mode."
+        if test "${1:-}" = --reboot ; then
+            echo "Restarting..."
+            sleep 1
+            exec reboot
+        fi ;;
+    off)
+        rm -f /etc/lp/safe-mode-next
+        echo "The next boot starts normally." ;;
+    *)
+        echo "usage: lp-safe-mode [--reboot|off|status]" >&2
+        exit 2 ;;
+esac

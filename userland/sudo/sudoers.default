@@ -1,0 +1,27 @@
+#
+# /etc/sudoers - who may run what as whom, through sudo.
+#
+# Edit it with `sudo visudo`, never directly: sudo refuses to run for
+# anybody while this file does not parse, and visudo checks your edit
+# before saving it.
+#
+# Members of group sudo are the administrators. They type their OWN
+# password, which is then remembered for 5 minutes on that terminal.
+# The root account itself is locked; this file is how root is reached.
+#
+# Add rules of your own in /etc/sudoers.d/ (file names without a dot),
+# e.g.  alice ALL=(root) NOPASSWD: /usr/bin/apt update
+#
+Defaults	env_reset
+Defaults	mail_badpass
+Defaults	secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults	timestamp_timeout=5
+Defaults	passwd_tries=3
+
+# User privilege specification
+root	ALL=(ALL:ALL) ALL
+
+# Allow members of group sudo to execute any command
+%sudo	ALL=(ALL:ALL) ALL
+
+@includedir /etc/sudoers.d

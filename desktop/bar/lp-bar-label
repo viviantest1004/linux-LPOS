@@ -1,0 +1,69 @@
+#!/bin/sh
+# 상단바가 스스로 알 수 없는 것들. waybar 의 설정은 JSON 이라 언어도
+# 기계의 상태도 물어볼 수 없어서, 그 답을 여기서 만든다.
+#
+#   lp-bar-label search   왼쪽의 '검색' / 'Search'
+#   lp-bar-label ime      지금 걸린 자판
+#   lp-bar-label mode     켜져 있는 제약 (명세서 2-4)
+
+case "$1" in
+search)
+    case "$LANG" in
+    ko*) echo "검색" ;;
+    *)   echo "Search" ;;
+    esac
+    ;;
+
+ime)
+    # 고정된 글자를 찍어 두면 자판을 바꿔도 그대로라서, 표시가 아니라
+    # 장식이 된다. 컴포지터에게 묻는다.
+    layout=$(swaymsg -t get_inputs -r 2>/dev/null | grep -o 'xkb_active_layout_name": "[^"]*' | head -1 | sed 's/.*: "//')
+    case "$layout" in
+    *Korean*|*한*) echo "한" ;;
+    *)             echo "A" ;;
+    esac
+    ;;
+
+mode)
+    # 명세서 2-4. 방해 금지·비행기·절전이 켜져 있으면 한 덩어리로
+    # 보여 준다. 색이 하나(앰버)라 아이콘이 셋이어도 산만하지 않고,
+    # "제한이 걸려 있다" 가 한눈에 읽힌다.
+    #
+    # 특히 방해 금지는 켜 둔 것을 잊고 "왜 알림이 안 오지" 하는 일이
+    # 흔하므로 반드시 표시한다. 표시가 없으면 그 상태는 고장과
+    # 구별되지 않는다.
+    out=""
+
+    # 방해 금지 - mako 에게 직접 묻는다. 우리가 따로 기억해 두면
+    # makoctl 로 바꿨을 때 상단바만 옛말을 하게 된다.
+    if makoctl mode 2>/dev/null | grep -q do-not-disturb ; then
+        out="$out✱"
+    fi
+
+    # 비행기 모드.
+    #
+    # 처음에는 "인터페이스가 전부 내려가 있으면 비행기 모드" 로
+    # 읽었다. 그것은 틀렸다 - 랜선을 뽑아도, 부팅 중 아직 올라오지
+    # 않았어도 같은 모습이고, 그때마다 상단바가 켠 적 없는 비행기
+    # 모드를 켜져 있다고 말했다. 연결이 없는 것과 연결을 끊은 것은
+    # 다른 일이다.
+    #
+    # 그래서 사람이 켰다는 기록을 본다. 퀵메뉴와 설정이 이 파일을
+    # 쓰고, 둘 다 같은 파일을 보므로 어느 쪽에서 켜도 여기에 나온다.
+    if test -f "$HOME/.config/lp/airplane" ; then
+        out="$out✈"
+    fi
+
+    # 절전
+    gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+    if test "$gov" = powersave ; then
+        out="$out◐"
+    fi
+
+    echo "$out"
+    ;;
+
+*)
+    echo ""
+    ;;
+esac
